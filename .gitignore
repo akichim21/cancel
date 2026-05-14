@@ -1,0 +1,17 @@
+cancel-billing-service-admin
+cancel-billing-service-api
+cancel-billing-service-lp
+cancel-billing-service
+.DS_Store
+
+!/docs/cancel-billing-service-admin/
+!/docs/cancel-billing-service-api/
+!/docs/cancel-billing-service-lp/
+!/docs/shaire-admin/
+!/docs/cancel-billing-service/
+.claude/tmp
+.worklog/
+.next
+.claude/scheduled_tasks.lock
+__pycache__
+.pyc
