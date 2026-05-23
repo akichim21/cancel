@@ -1,0 +1,24 @@
+{
+  "issueNumber": 1,
+  "branchName": "feature/GTSS-1",
+  "baseBranchOverride": null,
+  "worktreeDir": "feature-GTSS-1",
+  "slot": 1,
+  "ports": {
+    "api": 1339,
+    "admin": 3001,
+    "userPortal": 5174,
+    "lp": 5274
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/feature-GTSS-1",
+      "branch": "feature/GTSS-1",
+      "baseBranch": "main"
+    },
+    "cancel-billing-service": { "hasWorktree": false },
+    "cancel-billing-service-admin": { "hasWorktree": false },
+    "cancel-billing-service-lp": { "hasWorktree": false }
+  }
+}

@@ -1,0 +1,87 @@
+# cancel-billing-service-lp（LP・申請フォーム）
+
+サービスの公開 LP およびサロン申請フォーム、決済結果ページ。URL: https://cancel.co.jp/
+
+## 技術スタック
+
+- React 18 + **JSX**（TS ではない）+ Vite
+- Tailwind CSS
+- Framer Motion（アニメーション）
+- React Hook Form + Zod
+- React Router DOM v7
+- Lucide React（アイコン）
+
+## ページ構成
+
+| パス | コンポーネント | 用途 |
+|---|---|---|
+| `/` | `src/App.jsx`（+ `src/components/sections/*`） | メイン LP・申請フォーム |
+| `/stripe-success` | `src/components/StripeSuccess.jsx` | Stripe 登録完了判定 |
+| `/stripe-refresh` | `src/components/StripeRefresh.jsx` | Account Link 再発行 |
+| `/payment-success` | `src/components/PaymentSuccess.jsx` | 顧客の決済成功 |
+| `/payment-cancel` | `src/components/PaymentCancel.jsx` | 顧客の決済キャンセル |
+| `/privacy-policy` | `src/pages/PrivacyPolicy.jsx` | プライバシーポリシー |
+| `/terms-of-service` | `src/pages/TermsOfService.jsx` | 利用規約 |
+| `/specified-commercial-transaction` | `src/pages/SpecifiedCommercialTransaction.jsx` | 特定商取引法表記 |
+
+## 重要コンポーネント
+
+### `StripeSuccess.jsx`
+
+- `applicationId` クエリパラメータを受け取る
+- API で `details_submitted` を確認 → 成功 / 未完了画面に分岐
+- 未完了時は `/stripe-refresh` への誘導リンクを表示
+
+### `StripeRefresh.jsx`
+
+- Stripe Account Link が期限切れになった場合に再発行
+- API: `POST /stripe/onboarding-link` を呼び出して新しいリンクを取得
+
+### `PricingSection.jsx`
+
+- LP 内の料金プラン表示セクション
+
+## API 通信
+
+ベース URL は **`VITE_API_URL`**（admin は `VITE_API_BASE_URL` なので注意）。
+
+| 環境 | `VITE_API_URL` |
+|---|---|
+| ローカル | `http://localhost:3000` |
+| dev | `https://dev.api.cancel.co.jp` |
+| prod | `https://api.cancel.co.jp` |
+
+## プライバシーポリシー
+
+外部 URL（`https://www.shairesalon-go.today/privacy-policy-text/`）から fetch して表示。
+表示エラー時は外部サイトの CORS ヘッダ（`Access-Control-Allow-Origin: *`）を要確認。
+
+## ローカル起動
+
+```bash
+npm install
+npm run dev    # http://localhost:5173
+```
+
+## ビルド & デプロイ
+
+```bash
+npm run build:dev
+npm run build:prod
+./deploy.sh dev
+./deploy.sh prod
+```
+
+## セキュリティ修正履歴
+
+`SECURITY_FIXES.md` 参照。過去のセキュリティ対応内容を記録している。
+
+## テスト
+
+未整備。LP は静的なため E2E（Playwright）で動作確認するのが現実的（ルート CLAUDE.md 参照）。
+
+## 関連ドキュメント
+
+- `docs/product/application-flow.md` — 申請〜オンボーディングの全体像
+- `docs/product/cancellation-flow.md` — 顧客決済フロー
+- `docs/tech/stripe-connect.md` — Stripe Connect の挙動詳細

@@ -1,0 +1,97 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/worklog-capture.sh",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/worklog-session-end.sh",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Edit",
+      "MultiEdit",
+      "Write",
+      "Read",
+      "Bash(npm run:*)",
+      "Bash(xcrun:*)",
+      "Bash(xcodebuild clean:*)",
+      "Bash(xcrun simctl list devices available:*)",
+      "Bash(npx:*)",
+      "Bash(ls:*)",
+      "Bash(node:*)",
+      "Bash(sed:*)",
+      "Bash(git add:*)",
+      "Bash(git submodule:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(tree:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(gh:*)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git fetch:*)",
+      "Bash(git branch:*)",
+      "Bash(git worktree:*)",
+      "Bash(git checkout:*)",
+      "Bash(git show:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker-compose restart:*)",
+      "Bash(docker-compose ps:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(curl:*)",
+      "Bash(set:*)",
+      "Bash(yarn:*)",
+      "Bash(copilot:*)",
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(codex:*)",
+      "Bash(codex exec:*)",
+      "Bash(aws:*)",
+      "Bash(aws s3:*)",
+      "Bash(aws cloudfront:*)",
+      "Bash(aws lambda:*)",
+      "Bash(aws dynamodb:*)",
+      "Bash(./deploy.sh:*)",
+      "Bash(./deploy-api.sh:*)",
+      "Bash(./deploy-admin.sh:*)",
+      "Write(//tmp/codex-*)",
+      "Write(//tmp/review-*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(gh issue create*GO-TODAY-SHAiRE-SALON*)",
+      "Bash(gh api*repos/GO-TODAY-SHAiRE-SALON*issues*)",
+      "Bash(./deploy.sh prod*)",
+      "Bash(./deploy-api.sh prod*)",
+      "Bash(./deploy-admin.sh prod*)"
+    ]
+  }
+}
