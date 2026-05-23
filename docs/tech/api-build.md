@@ -77,6 +77,12 @@ build({
 zip 化・`aws lambda update-function-code`・環境変数設定・API Gateway デプロイ・ヘルスチェックは従来どおり。
 本番デプロイは人間が手元で実行する（`.claude/settings.json` で `./*.sh prod*` は deny）。
 
+### デプロイ成果物は Git 管理しない
+
+`dist/`・`lambda-deployment-*.zip` などのバンドル/zip 成果物は **ローカル生成のみ**で、Git にはコミットしない。
+`.gitignore` に `dist/` と `lambda-deployment-*.zip` を登録済み（Issue #10 で過去にコミットされていた zip 12個を追跡停止）。
+成果物は `deploy-api.sh` 実行時に都度生成されるため、リポジトリにバイナリを増やさない。
+
 ## 検証ゲート
 
 | ゲート | コマンド | 合格条件 |
