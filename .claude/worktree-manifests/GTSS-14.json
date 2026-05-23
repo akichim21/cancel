@@ -1,0 +1,30 @@
+{
+  "issueNumber": 14,
+  "branchName": "GTSS-14",
+  "baseBranchOverride": "review/rafactor",
+  "worktreeDir": "GTSS-14",
+  "slot": 4,
+  "ports": {
+    "api": 1342,
+    "admin": 3004,
+    "userPortal": 5177,
+    "lp": 5277
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-14",
+      "branch": "GTSS-14",
+      "baseBranch": "review/rafactor"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

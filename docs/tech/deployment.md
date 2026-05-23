@@ -62,6 +62,40 @@ cd cancel-billing-service-lp && ./deploy.sh dev         # / prod
    aws logs tail /aws/lambda/cancel-billing-service-dev --follow --profile cancel-billing-service-prod
    ```
 
+## Infrastructure as Code (Terraform)
+
+dev のインフラ（Lambda / API Gateway(REST) / IAM 実行ロール）は Terraform で IaC 化を進めている。
+リポジトリ: `~/infra/cancel-billing-service-infra`（DynamoDB は #13 の Aurora 移行に委ねるため対象外）。
+
+```
+modules/api-compute/      Lambda + API Gateway(REST proxy) + IAM 実行ロール の再利用モジュール
+environments/dev-legacy/  現行 dev 資源（prod アカウント 145887419870 同居）を import する環境
+environments/dev/         dev アカウント(818059182115) への再構築 雛形（apply は人手）
+```
+
+- `deploy-api.sh` がデプロイ時に上書きする **コード / 環境変数 / API GW deployment** は、
+  モジュール側で `ignore_changes` にしている（Terraform はインフラの骨格のみ管理）。
+- `serverless.yml` は実デプロイ経路ではない（参考宣言）。真実は `deploy-api.sh` + 上記 Terraform。
+- state はローカル backend（S3 + DynamoDB ロックの remote backend 化は follow-up）。
+
+```bash
+cd ~/infra/cancel-billing-service-infra/environments/dev-legacy
+terraform init && terraform plan   # → 14 imported / 再 plan で No changes
+```
+
+### dev/prod アカウント分離（移設中）
+
+| 用途 | アカウント ID | AWS プロファイル | 状態 |
+|---|---|---|---|
+| prod | 145887419870 | `cancel-billing-service-prod` | 稼働中 |
+| dev（現状・移設元） | 145887419870 に同居 | `cancel-billing-service-prod` | 稼働中（移設対象） |
+| dev（移設先） | 818059182115 | `cancel-billing-service-dev` | 構築雛形（未 apply） |
+
+- ドメイン `dev.api.cancel.co.jp`（REGIONAL）と Route53 ホストゾーン `cancel.co.jp`
+  (`Z07157901B9GNXLZJAADK`) は **prod アカウント所在**。dev アカウントにホストゾーンは無い。
+  移設時はクロスアカウント DNS かサブドメイン委譲 + ACM 再発行 + Stripe webhook 再登録が必要。
+- 詳細は `~/infra/cancel-billing-service-infra/README.md` と Issue akichim21/cancel#14 を参照。
+
 ## トラブルシューティング
 
 **Lambda が API Gateway から呼び出せない (500)**
