@@ -34,25 +34,33 @@ DynamoDB / 外部サービス（Stripe / SES / Nodemailer / Twilio）
 | 基盤 | `src/config.ts` | `APPLICATION_STATUS`、テーブル名解決（`tableNames`）、Twilio 送信元設定 |
 | 基盤 | `src/utils/*` | 純粋ユーティリティ（`crypto` / `phone` / `cors`） |
 | 基盤 | `src/middleware/auth.ts` | 認証ガード（`verifyToken` / `extractToken` / `requireAdmin` / `requireAuth`） |
-| repository | `src/repositories/{applications,users,cancellations}.repository.ts` | テーブル別の DynamoDB CRUD。テーブル名所有 |
-| repository | `src/repositories/table-setup.ts` | DynamoDB テーブル初期化（旧 `dynamodb-setup.ts`） |
+| repository | `src/repositories/{applications,application-users,users,cancellations,monthly-sales}.repository.ts` | テーブル別の PostgreSQL CRUD（Drizzle 経由）。各メソッドは camelCase ドメインオブジェクトを返す |
 | service | `src/services/*.service.ts` | 業務ロジック（auth / application / cancellation / invoice / stripe / webhook / notification） |
 | handler | `src/handlers/*.handler.ts` | ドメイン別ルート登録。`index.ts` の `registerRoutes(app)` で集約 |
 
-## テーブル名解決の集約
+## DB スキーマ命名規約（REQ-3 / GTSS-17）
 
-旧実装では `process.env.NODE_ENV === 'prod'` による prod/dev 分岐が各関数に散在していた。
-本構成では `src/config.ts` の `tableNames` getter に集約し、各 repository がこれを参照する。
-getter のため**呼び出し時評価**で、解決結果は旧実装と同一。
+外部キー命名は参照先テーブルに応じて以下に統一する:
 
-| 論理テーブル | 解決ロジック |
-|------------|------------|
-| applications | `process.env.DYNAMODB_TABLE_NAME` |
-| users | `NODE_ENV === 'prod'` → `cancel-billing-users-prod` / それ以外 `cancel-billing-users-dev` |
-| cancellations | `NODE_ENV === 'prod'` → `cancel-billing-cancellations-prod` / それ以外 `cancel-billing-cancellations-dev` |
+- `user_id` カラム → **users.id を参照する場合のみ**（管理者ユーザー参照）
+- `application_id` カラム → **applications.application_id を参照**（サロン参照）
+- `application_user_id` カラム → **application_users.id を参照**（サロン側ログインユーザー参照）
 
-repository メソッドは AWS SDK のレスポンス（`Item` / `Items` / `Attributes`）をそのまま返すため、
-service 側の読み出しコードは旧実装から不変。
+主要テーブルの外部キー:
+
+| 子テーブル.カラム | 参照先 | ON DELETE |
+|---|---|---|
+| `application_users.application_id` | `applications.application_id` | CASCADE |
+| `cancellations.application_id` | `applications.application_id` | RESTRICT |
+| `cancellations.created_by_application_user_id` | `application_users.id` | SET NULL |
+| `monthly_sales.application_id` | `applications.application_id` | CASCADE |
+
+PK 採番方針:
+- `applications.application_id`: アプリ層生成（`app_${Date.now()}`）
+- `application_users.id`: アプリ層 `randomUUID()`（UUID v4）
+- `users.id`: アプリ層 `randomUUID()`（UUID v4）。旧 PK の email は別カラム + UNIQUE
+- `cancellations.id`: アプリ層生成（`cancellation_${Date.now()}` / `inv_${Date.now()}`）
+- `monthly_sales.id`: アプリ層生成（`sales_${applicationId}_${monthYear}`）
 
 ## 外部サービス境界（注入シーム）
 
