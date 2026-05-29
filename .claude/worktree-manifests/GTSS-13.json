@@ -1,0 +1,37 @@
+{
+  "issueNumber": 13,
+  "branchName": "feature/GTSS-13",
+  "baseBranchOverride": null,
+  "worktreeDir": "feature-GTSS-13",
+  "slot": 5,
+  "ports": {
+    "api": 1343,
+    "admin": 3005,
+    "userPortal": 5178,
+    "lp": 5278
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/feature-GTSS-13",
+      "branch": "feature/GTSS-13",
+      "baseBranch": "main"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    },
+    "infra/cancel-billing-service-infra": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/infra/cancel-billing-service-infra/.worktrees/feature-GTSS-13",
+      "branch": "feature/GTSS-13",
+      "baseBranch": "main",
+      "note": "REQ-1 (Aurora/Data API Terraform) — this session. API code migration (REQ-2/3/4/5/7) handled by a separate session in cancel-billing-service-api."
+    }
+  }
+}

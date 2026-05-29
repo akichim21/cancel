@@ -1,0 +1,38 @@
+{
+  "issueNumber": 17,
+  "branchName": "api-schema-refactor",
+  "baseBranchOverride": "feature/GTSS-13",
+  "worktreeDir": "api-schema-refactor",
+  "slot": 9,
+  "ports": {
+    "api": 1347,
+    "admin": 3009,
+    "userPortal": 5182,
+    "lp": 5282
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/api-schema-refactor",
+      "branch": "api-schema-refactor",
+      "baseBranch": "feature/GTSS-13"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service/.worktrees/api-schema-refactor",
+      "branch": "api-schema-refactor",
+      "baseBranch": "main",
+      "note": "feature/GTSS-13 不在のため main をベースに採用。GTSS-13 は API のみ変更"
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/api-schema-refactor",
+      "branch": "api-schema-refactor",
+      "baseBranch": "main",
+      "note": "feature/GTSS-13 不在のため main をベースに採用。GTSS-13 は API のみ変更"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

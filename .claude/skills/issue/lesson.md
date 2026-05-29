@@ -46,14 +46,16 @@
   2. そのデータが他のREQで作成されるものであれば依存関係を明記
   3. 共有テストインフラ（seed/フィクスチャ）の変更は影響範囲を明記（Playwright/Jest 両方に影響）
 
-### Codex CLI を起動するときは stdin を必ず /dev/null に繋ぐ
-- **問題**: `codex exec -s read-only "{prompt}" > /tmp/out.txt 2>&1` の形で起動した結果、prompt は引数で渡しているにも関わらず codex が stdin を待ち続けて hang し、約1時間28分ブロックして最終的に kill された
-- **正しい対応**: `codex exec --help` の通り「prompt が引数でも stdin が piped なら追加で読み込む」仕様。Bash ツールから起動すると stdin は閉じないため EOF を受け取れず無限待機になる。**必ず以下の3点を全部適用する**:
+### Codex CLI を起動するときは stdin を /dev/null に繋ぎ、`timeout` は付けない（macOSでは `timeout` が無い）
+- **問題1（stdin hang）**: `codex exec -s read-only "{prompt}" > /tmp/out.txt 2>&1` の形で起動した結果、prompt は引数で渡しているにも関わらず codex が stdin を待ち続けて hang し、約1時間28分ブロックして最終的に kill された
+- **問題2（timeout で exit 127）**: 上記の対策として `timeout 1200 codex exec ...` を使っていたが、**macOS には `timeout` コマンドが標準で存在しない**（GNU coreutils 非同梱、`gtimeout` も未導入）。その結果 `timeout` が見つからず **exit 127（command not found）で codex が一切実行されず**、サブエージェントが「Codex unavailable / timed out」と誤報告した（issue #2066 の issue-create フローで実際に発生。codex は `/opt/homebrew/bin/codex` に導入済みだった）。
+- **正しい対応**: `codex exec --help` の通り「prompt が引数でも stdin が piped なら追加で読み込む」仕様。Bash ツールから起動すると stdin は閉じないため EOF を受け取れず無限待機になる。**必ず以下を全部適用する**:
   1. 末尾に `< /dev/null` を付けて stdin を即 EOF
-  2. `timeout 1200 codex exec ...` で wall-clock 強制終了（codex の hard cap = 20分）
-  3. Bash ツールは **`run_in_background: true`** で起動する（Bash 前景 timeout 上限は 600000ms = 10分なので、20分 cap を効かせるには background 必須）
-- **適用範囲**: ask-codex / issue-update / issue-create / issue-manually-update の各 SKILL でテンプレ更新済み
+  2. **`timeout`（および `timeout 1200`）は付けない。** macOS では存在せず exit 127 になる。外側からの強制終了は正常な長時間調査の途中結果も失う。codex 自身の内部 hard cap（約20分）に任せる
+  3. Bash ツールは **`run_in_background: true`** で起動する（Bash 前景 timeout 上限は 600000ms = 10分なので、10分超の実行を許容するには background 必須）。完了通知（`status: completed`）を待ってから出力を読む。途中経過の BashOutput で独自に打ち切らない
+- **異常判定**: 完了通知が届いた後にのみ判定する。exit 127 は「Codex unavailable（コマンド未検出、PATH確認）」、最終応答（`^codex` ブロック）が無ければ出力末尾のエラー行を返す。途中経過で「timed out」と早とちりしない
+- **適用範囲**: ask-codex / issue-update / issue-create / issue-manually-update の各 SKILL で `timeout` 撤去済み（ask-codex は元から `timeout` 禁止だったが他3つが未追随だったのが今回の不整合の原因）
 - **再発防止コマンド形**:
   ```bash
-  timeout 1200 codex exec -s read-only "{prompt}" > /tmp/codex-{task}.txt 2>&1 < /dev/null
+  codex exec -s read-only "{prompt}" > /tmp/codex-{task}.txt 2>&1 < /dev/null
   ```

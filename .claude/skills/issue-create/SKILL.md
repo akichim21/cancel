@@ -170,18 +170,19 @@ Step 1 の把握結果を元に、以下の分析チームメイトを **エー�
   ```
   以下の手順を実行し、Codexの最終レビュー結果のみを返してください。
 
-  1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（Bashツールの前景timeout上限10分を超えるため必須）。完了通知を受けてから次に進む。
+  1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexの実行は10分を超えることがあり、Bashツールの前景timeout上限を超えるため必須）。完了通知を受けてから次に進む。
      **stdoutをファイルにリダイレクトし、stdinを/dev/nullに繋ぐこと。これを怠るとcodexがstdin待ちでhangし、数十分〜数時間ブロックする事故が発生済み（issue #3558対応時）。**
+     **`timeout` コマンドは絶対に付けないこと（NG）。** macOSには `timeout` が標準で存在せず `timeout 1200 codex ...` は exit 127（command not found）になりcodexが一切実行されない（実際に発生）。また外側からの強制終了は正常な長時間調査の途中結果を失う。codex自身の内部hard cap（約20分）に任せる。
 
-     timeout 1200 codex exec -s read-only "{Codexプロンプト}" > /tmp/codex-issue-create-review.txt 2>&1 < /dev/null
+     codex exec -s read-only "{Codexプロンプト}" > /tmp/codex-issue-create-review.txt 2>&1 < /dev/null
 
   2. 実行完了後、出力ファイルからCodexの最終レスポンスのみを抽出する:
 
      LAST_LINE=$(grep -n "^codex" /tmp/codex-issue-create-review.txt | tail -1 | cut -d: -f1)
      awk "NR>=${LAST_LINE}" /tmp/codex-issue-create-review.txt
 
-  3. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。
-  4. timeoutで打ち切られた場合（exit 124）は「Codex timed out」とだけ返し、無理に再試行しない。
+  3. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。途中経過のBashOutputを見て独自に打ち切らない（完了通知を待つ）。
+  4. 異常終了の判定は完了通知が届いた後にのみ行う。出力ファイル冒頭に `codex` から始まる最終応答ブロックが無く、かつ exit code が 127 の場合は「Codex unavailable（codexコマンド未検出。PATHを確認）」と返す。それ以外で最終応答が無い場合は出力末尾のエラー行をそのまま返す。無理に再試行しない。
   ```
 
   Codexプロンプト:
