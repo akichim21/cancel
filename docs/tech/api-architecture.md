@@ -73,6 +73,15 @@ service 側の読み出しコードは旧実装から不変。
 - 担保は #1 で構築した `app.request()` E2E スイート（全 green）による（`docs/tech/api-testing.md`）。
   分離した service / repository は unit テストで個別担保する（モック repository 注入、通知送信先/条件）。
 
+## applications の論理削除と参照整合（GTSS-19）
+
+> データ層は GTSS-13 で Aurora(PostgreSQL) + drizzle repository へ移行済み（本セクションは Aurora 前提）。
+
+- **論理削除（ソフトデリート）**: `applications` に `deletedAt`（text, ISO8601）＋ `applications_deleted_at_idx` を持つ。削除は物理 DELETE せず、PII マスク + `deletedAt` セットの UPDATE（`applicationsRepo.softDelete`）。一覧取得（`getAll`）のみ `deletedAt IS NULL` で除外し、`getById` / `findAllWithShop`（請求の店舗名 JOIN）は削除済みも返す。マスク対象/保持対象カラムは `docs/product/application-flow.md` を参照。
+- **`application_id` の NOT NULL 化**: 論理削除化により親 `applications` が物理削除されず孤児が発生しないため、`cancellations.application_id` / `monthly_sales.application_id` を **NOT NULL** とする。FK は `cancellations`=`ON DELETE RESTRICT` / `monthly_sales`=`ON DELETE CASCADE` を維持。新規作成パス（cancellation 作成・月次 `upsertMonthly`）はいずれも `applicationId` 必須のため、NULL を投入し得る業務経路は無い。
+- **移行スクリプトの孤児スキップ**: `scripts/migrate-dynamodb-to-aurora.ts` は、親 `applications` に紐づかない孤児 cancellation / monthly_sales を**投入せずスキップ**し `orphans` 統計に計上する（NOT NULL 化に整合）。`userId→applicationId` のリネームは純粋関数 `toCancellationRow`、孤児判定・スキップは投入ループへ集約。
+- **スキーマ生成**: prod 未リリース前提で初期マイグレーション `0000_init.sql` と drizzle メタ（`meta/0000_snapshot.json` / `_journal.json`）を再生成して反映する。GIN trigram index に必須の `CREATE EXTENSION IF NOT EXISTS pg_trgm;` は先頭に保持する。
+
 ## 関連ドキュメント
 
 - `docs/tech/api-testing.md`: テスト方針（Vitest / `app.request()` / モック戦略）
