@@ -69,15 +69,24 @@ GitHub Issueベースの実装作業時は、GitHub Issueコメントとして�
 
 ## AWS 環境
 
-- AWS プロファイル: `cancel-billing-service-prod`（dev/prod 共通）
+- AWS プロファイル: **dev=`cancel-billing-service-dev`（818059182115）/ prod=`cancel-billing-service-prod`（145887419870）**
+  （GTSS-13 で dev 資源を dev アカウントへ移設。デプロイ/マイグレーションは dev プロファイルを使う。
+  ただし DynamoDB→Aurora 移行の DynamoDB scan のみ、旧テーブルが prod アカウント同居のため prod プロファイル）
 - リージョン: `ap-northeast-1`
 - Lambda関数名: `cancel-billing-service-dev` / `cancel-billing-service-prod`
 
-| サブリポジトリ | dev S3 | prod S3 | dev CloudFront | prod CloudFront |
+dev は GTSS-13 で **dev アカウント(818059182115)** へ移設（S3 を `*-dev-818059182115` に改名、CloudFront は
+dev アカウントで新規。ID は `terraform output dev_frontend_cloudfront_ids` を deploy*.sh / 各 CLAUDE.md へ記入）。
+prod は従来どおり prod アカウント。infra は `cancel-billing-service-infra/dev`（`modules/static-site`）が管理。
+
+| サブリポジトリ | dev S3（dev アカウント） | prod S3 | dev CloudFront | prod CloudFront |
 |---|---|---|---|---|
-| cancel-billing-service-lp | `cancel-billing-lp-dev-145887419870` | `cancel-billing-lp-prod-app` | `E1OUC1XEZOT7LN` | `E3AU8H3BJJK35A` |
-| cancel-billing-service (user portal) | `cancel-billing-user-web-dev-145887419870` | `cancel-billing-user-portal-prod-app` | `E71P95BIB50NW` | `EKU0PRCYVJUIZ` |
-| cancel-billing-service-admin | `cancel-billing-admin-dev-145887419870` | `cancel-billing-admin-prod-app` | `E15K6M6VG5BSZ8` | `EZ2JYIS8UOYRB` |
+| cancel-billing-service-lp | `cancel-billing-lp-dev-818059182115` | `cancel-billing-lp-prod-app` | terraform output（dev acct） | `E3AU8H3BJJK35A` |
+| cancel-billing-service (user portal) | `cancel-billing-user-web-dev-818059182115` | `cancel-billing-user-portal-prod-app` | terraform output（dev acct） | `EKU0PRCYVJUIZ` |
+| cancel-billing-service-admin | `cancel-billing-admin-dev-818059182115` | `cancel-billing-admin-prod-app` | terraform output（dev acct） | `EZ2JYIS8UOYRB` |
+
+> 移設前の prod アカウント同居資源（参考・撤去対象 REQ-3）: dev S3 `*-dev-145887419870` /
+> dev CloudFront lp=`E1OUC1XEZOT7LN` user=`E71P95BIB50NW` admin=`E15K6M6VG5BSZ8`。
 
 ## デプロイ
 
@@ -146,7 +155,7 @@ aws lambda add-permission \
   --statement-id apigateway-invoke \
   --action lambda:InvokeFunction \
   --principal apigateway.amazonaws.com \
-  --profile cancel-billing-service-prod
+  --profile cancel-billing-service-dev   # dev は dev アカウント。prod は cancel-billing-service-prod
 ```
 
 **デプロイで「API Gateway が見つかりません」**
