@@ -122,8 +122,29 @@ GTSS-19 の論理削除を拡張する。業務挙動の概要は `docs/product/
   `'pending'` / `must_change_password`→`false`）を生成後 SQL に**手動で前置**する。aws-data-api（dev/prod）では
   適用前に本番データの NULL 実在を確認する。
 
+## サロンボード取り込みの拡張（GTSS-817）
+
+- **キャンセル status の SSOT 化**: `src/constants/cancellation-status.ts` を新設（`application-enums.ts` と同方針・
+  依存ゼロ・フロント共有可）。`pre_send`/`pending`/`paid`/`canceled`/`failed` と日本語ラベル・正規化（legacy `sent`→
+  `pending`）を集約。admin/user フロントの型・ラベルもこれに整合。一覧/詳細レスポンスは `serializeCancellation`
+  で `status` 正規化 + `statusLabel` を付与する。
+- **新テーブル**: `external_shops`（会社→店舗 1:N）/ `external_integrations`（会社×連携元の認証情報。
+  パスワードは AES-256-GCM envelope で `encrypted_secret` に保管）/ `external_import_logs`（対象外/スキップの
+  監査ログ・予約単位 upsert）。`cancellations` に取り込み用カラム + `(externalShopId, externalReservationId)`
+  部分ユニーク（冪等キー。手動作成は両 NULL で対象外）。migration `0003`（`sent`→`pending` バックフィル含む）。
+- **`createInvoice` の保存/送信分割**: 取り込みは「保存のみ」（`cancellationsRepo.createImported` で `pre_send` 作成・
+  通知なし）、送信は `cancellation-send.service.ts`（運営=`requireAdmin` / サロン=`requireAuth`+所有者チェックの
+  2 系統。`status='pre_send'` 条件付き更新で冪等＝二重送信防止）。手動取り込みは `POST /cancellations/import`、
+  日次は batch `action='salonboard-import'`（共有サービス）。
+- **可逆暗号 + KMS**: `utils/crypto.ts` に envelope 暗号（データ鍵を dev/prod は KMS、local/test は env マスター鍵で
+  保護）。`clients.ts` は KMS を lazy require。`config.isProdEnv()` を export し非 prod PII マスクの出し分けに使う。
+- **一覧の店舗名分離**: `findAllWithShop` は会社名（`companyName`/後方互換 `shopName`）と発生店舗名（`storeName`=
+  `external_shops` JOIN）を別フィールドで返す。サロン向け一覧は `findByApplicationIdWithShop`。
+- 詳細: `docs/tech/salonboard-import.md` / `docs/product/salonboard-import.md`。
+
 ## 関連ドキュメント
 
 - `docs/tech/api-testing.md`: テスト方針（Vitest / `app.request()` / モック戦略）
 - `docs/tech/api-build.md`: esbuild バンドル / デプロイ
+- `docs/tech/salonboard-import.md`: サロンボード取り込みの技術仕様
 - `docs/tech/architecture.md`: システム全体構成

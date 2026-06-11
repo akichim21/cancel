@@ -66,8 +66,32 @@ npm run batch:restore:local -- app_xxx # restoreApplication('app_xxx')
 `runtime` は `ignore_changes`）。実コードと環境変数（`NODE_ENV` / `AURORA_*`）は Terraform apply 後に
 `./deploy-batch.sh {dev,prod}` が配備する。
 
+## サロンボード取り込み（`salonboard-import`・GTSS-817）
+
+`src/batch.ts` の `case 'salonboard-import'` で、共有サービス `runSalonboardImport()`（手動取り込み HTTP
+`POST /cancellations/import` と同一ロジック）を起動する。連携済み会社の全ヘアサロンからキャンセル予約を
+取り込み、「送信前」でキャンセル請求を作成する（通知は出さない＝送信は別経路）。
+
+```bash
+# 手動起動（dev）。実発火（JST 0:10）の疎通確認にも使う。
+aws lambda invoke \
+  --function-name cancel-billing-service-batch-dev \
+  --payload '{"action":"salonboard-import"}' \
+  --cli-binary-format raw-in-base64-out \
+  --profile cancel-billing-service-dev /dev/stdout
+```
+
+- **スケジュール**: EventBridge Scheduler `cron(10 0 * * ? *)` + `schedule_expression_timezone="Asia/Tokyo"`
+  （JST 0:10）。infra `~/infra/cancel-billing-service-infra` の `batch-compute` モジュール
+  `aws_scheduler_schedule.salonboard_import`（`enable_import_schedule`）。
+- **権限/環境**: 取り込みは通知を出さないため `initClients()` 不要だが、**サロンボードへの外部 HTTP egress** と
+  **認証情報復号の KMS 権限**（`kms:Encrypt/Decrypt` を単一鍵 ARN に限定）+ 環境変数 `CREDENTIALS_KMS_KEY_ID` が必要。
+  共有ロール（`cancel-billing-lambda-role`）に付与すること。VPC 内実行時は egress 経路（NAT 等）を要確認。
+- 詳細: `docs/tech/salonboard-import.md`。
+
 ## 関連
 
 - 業務挙動: `docs/product/application-flow.md`「申請の削除（論理削除 / 退会化 + 顧客PIIマスク + 90日バックアップ）」
 - 技術詳細: `docs/tech/api-architecture.md`「申請削除フローの拡張（GTSS-20）」
+- サロンボード取り込み: `docs/tech/salonboard-import.md` / `docs/product/salonboard-import.md`
 - テスト方針: `docs/tech/api-testing.md`「バッチ（restore / purge）のテスト方針」
