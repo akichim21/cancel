@@ -18,11 +18,13 @@ Run a single query with `codex exec`. **必ず `< /dev/null` でstdinを閉じ�
 codex exec "Your question or task here" < /dev/null
 ```
 
-## 推奨: Haiku サブエージェント経由の実行
+## 推奨: Sonnet サブエージェント経由の実行
 
 **問題**: `codex exec` の出力には中間のツール呼び出し結果（rg, sed等）が大量に含まれ、親Claudeのコンテキストトークンを浪費する。
 
-**解決策**: `model: "haiku"` サブエージェントで実行し、stdoutをファイルにリダイレクトし、最終レスポンスのみ抽出して返す。
+**解決策**: `model: "sonnet"` サブエージェントで実行し、stdoutをファイルにリダイレクトし、最終レスポンスのみ抽出して返す。
+
+> **なぜ haiku ではなく sonnet か**: haiku サブエージェントは「Monitorで監視中。完了したら抽出して返す」と途中報告してターンを終了してしまう事故が複数回発生した。**サブエージェントはバックグラウンドジョブ完了時に再呼び出しされない**（完了通知＝`<task-notification>` で再起動されるのは親=メインループのみ）。サブエージェントがターンを終えるとその時点で結果は永久に失われる。したがって (1) モデルを sonnet にし、(2) 後述のとおり**同一ターン内で同期的にブロック**して待つ。
 
 ### ⚠️ 必ず守る起動オプション（hang 防止）
 
@@ -32,7 +34,8 @@ codex exec "Your question or task here" < /dev/null
 
 1. `< /dev/null` で stdin を即 EOF にする
 2. **`timeout` コマンドで wall-clock タイムアウトを付けない（NG）**。理由は下記「タイムアウト禁止」セクション参照。codex 自身の内部 hard cap（約20分）に任せる
-3. **Bash ツールは `run_in_background: true` で起動する**。Bash ツールの前景 timeout 上限は 600000ms = 10分なので、codex の長時間実行を許容するには background 実行が必須。完了通知を待ってから出力ファイルを読む
+3. **Bash ツールは `run_in_background: true` で起動する**。Bash ツールの前景 timeout 上限は 600000ms = 10分なので、codex の長時間実行を許容するには background 実行が必須。task_id を控える
+4. **同一ターン内で同期的に完了を待つ**: 完了通知（`<task-notification>`）による再呼び出しに頼らない（サブエージェントには届かない）。`TaskOutput({task_id, block: true, timeout: 600000})` を status が completed になるまで繰り返し呼んでブロックする。**待機中にターンを終了したり「監視中」等の途中メッセージを返さない**
 
 ### 🚫 タイムアウト禁止（NG）
 
@@ -46,9 +49,9 @@ codex exec "Your question or task here" < /dev/null
 **適用すべきこと:**
 
 - `timeout` コマンドを **付けない**。
-- Bash は **必ず `run_in_background: true`** で起動し、完了通知（`<task-notification>` の `status: completed`）を待つ。
-- 「タイムアウトした」と判定してよいのは、**完了通知が届いた上で**、codex プロセスが終了済み（`ps -p <PID>` で不在）かつ出力ファイルに最終応答（`^codex` 行から始まるブロック）が存在しない場合のみ。
-- 途中経過の `BashOutput` を見て独自判断で打ち切らない。
+- Bash は **必ず `run_in_background: true`** で起動し、`TaskOutput({task_id, block: true, timeout: 600000})` を status が completed になるまで繰り返し呼んで**同一ターン内で同期的にブロックして待つ**（`<task-notification>` の再呼び出しに頼らない＝サブエージェントには届かず、ターンを終えると結果が失われる）。
+- 「タイムアウトした」と判定してよいのは、**TaskOutput が completed を返した上で**、出力ファイルに最終応答（`^codex` 行から始まるブロック）が存在しない場合のみ。
+- 途中経過の `BashOutput` を見て独自判断で打ち切らない。**待機中にターンを終了しない／「監視中」等の途中メッセージで終わらない。**
 
 ### hang vs 正常動作の見分け方
 
@@ -57,28 +60,28 @@ codex exec "Your question or task here" < /dev/null
 | 出力ファイルサイズが定期的に増えている | 動いている。待つ |
 | `ps -p <PID>` でプロセスがある | 動いている。待つ |
 | `ps` で State が `S`/`SN`（sleeping） | 通常状態（I/O 待ち）。hang ではない |
-| 完了通知未着 & プロセスは生きてる | 待つ |
-| `<task-notification>` の `status: completed` が来た | 判定可。exit code を確認 |
-| 完了通知あり & プロセス不在 & 出力に `^codex` ブロック無し | 異常終了。出力末尾を確認 |
+| `TaskOutput` が completed 以外を返す（実行中） | 待つ。再度 `TaskOutput({task_id, block:true, timeout:600000})` を呼ぶ |
+| `TaskOutput` が completed を返した | 判定可。exit code を確認 |
+| completed & 出力に `^codex` ブロック無し | 異常終了。出力末尾を確認 |
 | exit code 0 で出力ファイルに `^codex` の最終応答ブロックあり | 正常完了 |
 
 ### サブエージェントプロンプトテンプレート
 
 ```
 以下の手順を実行し、Codexの最終結果のみを返してください。
+**最重要: awk抽出結果（手順4）を返すまで絶対にターンを終了しないこと。「監視中」「Monitorで追跡中」「完了したら抽出して返します」等の途中報告を最終メッセージにして終わるのは失敗とみなす（実際に複数回発生）。サブエージェントはバックグラウンドジョブ完了時に再呼び出しされない＝ターンを終えると結果が永久に失われる。必ず同一ターン内で同期的にブロックして待つ。**
 
-1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexの実行は10分を超えることがあり、Bashツールの前景timeout上限を超えるため必須）。
+1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexの実行は10分を超えることがあり、Bashツールの前景timeout上限600000msを超えるため必須）。返ってくる task_id を控える。
    **stdoutをファイルにリダイレクト + stdinを/dev/nullに繋ぐこと。これを怠るとcodexがstdin待ちでhangする。**
    **`timeout` コマンドは絶対に付けないこと（NG）。** 外側から強制終了すると正常な長時間調査の途中結果を失う。codex自身の内部hard capに任せる。
 
    codex exec {options} "{prompt}" > /tmp/codex-{task-name}.txt 2>&1 < /dev/null
 
-2. **Bash background ジョブの完了通知（`<task-notification>` の `status: completed`）が届くまで何もしない。途中経過の BashOutput を見て判断しないこと。**
+2. **同一ターン内で同期的に完了を待つ**: `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。返り値の status が completed でなければ、再度 `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。これを completed になるまで繰り返す（codexが20分かかってもこのループで待てる）。**待機中はターンを終了せず、最終メッセージも出さない。** `<task-notification>` の再呼び出しには頼らない（サブエージェントには届かない）。
    - Web 検索を 5-10 回連発するのは codex の正常動作。各検索 1-2 分 × 数回で 10〜20 分かかることがある。
-   - 出力が一時的に静かでも、ファイルサイズが増え続けていれば動いている（`ls -la` で確認可能）。
-   - 完了通知前に「タイムアウトした」と判定してはいけない（事故再発防止）。
+   - 途中経過の BashOutput を見て「タイムアウトした」と早とちりしない（事故再発防止）。
 
-3. 完了通知後、exit code を確認:
+3. completed 後、exit code を確認:
    - exit code 0 → 出力ファイルからCodexの最終レスポンスのみを抽出する:
 
      LAST_LINE=$(grep -n "^codex" /tmp/codex-{task-name}.txt | tail -1 | cut -d: -f1)
@@ -102,7 +105,7 @@ Codex は判断材料が足りないと Web 検索を多用する。それが時
 - 「Web 検索は禁止。手元の知識とリポジトリのみで判断」
 - 親 Claude 側で先に `WebFetch` してドキュメントを取得し、その内容をプロンプトに埋め込んで渡す（最も確実で速い）
 
-Web 検索が必要な質問（最新ライブラリの API、仕様確認など）は時間がかかるのが前提。外側から `timeout` で打ち切らず、完了通知が来るまで待つこと。
+Web 検索が必要な質問（最新ライブラリの API、仕様確認など）は時間がかかるのが前提。外側から `timeout` で打ち切らず、`TaskOutput(block:true)` で completed になるまで同一ターン内で待つこと。
 
 ## Common options
 

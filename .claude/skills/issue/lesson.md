@@ -59,3 +59,12 @@
   ```bash
   codex exec -s read-only "{prompt}" > /tmp/codex-{task}.txt 2>&1 < /dev/null
   ```
+
+### Codex サブエージェントは sonnet ＋ 同期ブロックで待つ（haiku禁止／完了通知に頼らない）
+- **問題**: issue-create の Pre-PR レビューで Codex を `model: "haiku"` サブエージェント ＋ `run_in_background: true` で起動したところ、haiku は codex 起動後に「Monitorで監視中。完了したら抽出して返します」と**途中報告して約11秒（ツール2回）でターンを終了**した。**サブエージェントはバックグラウンドジョブ完了時に再呼び出しされない**（`<task-notification>` で再起動されるのは親＝メインループのみ）ため、codexの最終結果が一切抽出されず永久に失われた（issue #109 対応時、akichim21/shaire）。codex自体は正常で（同時刻の他フローでは数百KBの結果を生成）、原因は完全にオーケストレーション側。
+- **根本原因**: `run_in_background:true` の「完了したら再呼び出し」はメインループ向けの仕組み。`Agent` ツールで spawn したサブエージェントはターンを終えると親に最終メッセージを返して終了するだけで、後から再開されない。したがって「待つ」は受動的（通知待ち）ではなく**能動的（同一ターン内で同期ブロック）**でなければならない。
+- **正しい対応**:
+  1. **モデルは `sonnet`**（haiku は途中で諦めてターンを終える事故が複数回）。
+  2. **同一ターン内で同期ブロック**: `run_in_background: true` で起動して task_id を得たら、`TaskOutput({task_id, block: true, timeout: 600000})` を status が completed になるまで繰り返し呼ぶ（codexが20分かかってもループで待てる）。`<task-notification>` の完了通知には頼らない。
+  3. **待機中にターンを終了しない**。「監視中」「Monitorで追跡中」「完了したら返します」を最終メッセージにして終わるのは失敗。awk抽出結果を返すまでターンを継続する。
+- **適用範囲**: ask-codex / issue-create / issue-update / issue-manually-update / verify-testcases の各 SKILL を「sonnet ＋ 同期 TaskOutput ブロック ＋ ターン終了禁止」に統一済み（2026-06-02）。

@@ -162,27 +162,30 @@ Step 1 の把握結果を元に、以下の分析チームメイトを **エー�
 - `.claude/agents/req-completeness-checker.md` の定義を **Issue草案レビュー用に適応** する
 - **入力**: {SOURCE_DOCUMENT全文} + Issue草案全文 + Step 2統合結果 + Step 3分析結果
 - **自身のレビュー**: 元文書の意図反映、仕様網羅性、AC網羅性、REQ-AC対応を検証
-- **Codex呼び出し（haiku サブエージェント経由）**: 自身のレビューと並行して以下を `model: "haiku"` サブエージェント（`run_in_background: true`）で実行し、結果を統合する:
+- **Codex呼び出し（sonnet サブエージェント経由）**: 自身のレビューと並行して以下を `model: "sonnet"` サブエージェント（`run_in_background: true`）で実行し、結果を統合する:
 
-  **重要: Codex の出力には中間のツール呼び出し（rg, sed等の結果）が大量に含まれ、トークンを浪費する。必ず haiku サブエージェント経由で実行し、最終レスポンスのみを抽出して返すこと。**
+  **重要: Codex の出力には中間のツール呼び出し（rg, sed等の結果）が大量に含まれ、トークンを浪費する。必ず sonnet サブエージェント経由で実行し、最終レスポンスのみを抽出して返すこと。** （haiku は「監視中」と途中報告してターンを終了してしまい結果を取得できない事故があったため sonnet を使う。lesson 参照）
 
   サブエージェントへのプロンプト:
   ```
   以下の手順を実行し、Codexの最終レビュー結果のみを返してください。
+  **最重要: awk抽出結果を返すまで絶対にターンを終了しないこと。「監視中」「Monitorで追跡中」「完了したら抽出して返します」等の途中報告を最終メッセージにして終わるのは失敗とみなす（実際にhaikuで発生）。サブエージェントはバックグラウンドジョブ完了時に再呼び出しされない（=ターンを終えるとその時点で結果が永久に失われる）。必ず同一ターン内で同期的にブロックして待つこと。**
 
-  1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexの実行は10分を超えることがあり、Bashツールの前景timeout上限を超えるため必須）。完了通知を受けてから次に進む。
+  1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexの実行は10分を超えることがあり、Bashツールの前景timeout上限600000msを超えるため必須）。返ってくる task_id を控える。
      **stdoutをファイルにリダイレクトし、stdinを/dev/nullに繋ぐこと。これを怠るとcodexがstdin待ちでhangし、数十分〜数時間ブロックする事故が発生済み（issue #3558対応時）。**
-     **`timeout` コマンドは絶対に付けないこと（NG）。** macOSには `timeout` が標準で存在せず `timeout 1200 codex ...` は exit 127（command not found）になりcodexが一切実行されない（実際に発生）。また外側からの強制終了は正常な長時間調査の途中結果を失う。codex自身の内部hard cap（約20分）に任せる。
+     **`timeout` コマンドは絶対に付けないこと（NG）。** macOSには `timeout` が標準で存在せず `timeout 1200 codex ...` は exit 127（command not found）になりcodexが一切実行されない（実際に発生）。codex自身の内部hard cap（約20分）に任せる。
 
      codex exec -s read-only "{Codexプロンプト}" > /tmp/codex-issue-create-review.txt 2>&1 < /dev/null
 
-  2. 実行完了後、出力ファイルからCodexの最終レスポンスのみを抽出する:
+  2. **同一ターン内で同期的に完了を待つ**: `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。返り値の status が completed でなければ、再度 `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。これを completed になるまで繰り返す（codexが20分かかってもこのループで待てる）。**待機中は最終メッセージを出さず、ターンを終了しないこと。** 途中経過のBashOutputを見て独自に打ち切らない。
+
+  3. 完了後、出力ファイルからCodexの最終レスポンスのみを抽出する:
 
      LAST_LINE=$(grep -n "^codex" /tmp/codex-issue-create-review.txt | tail -1 | cut -d: -f1)
      awk "NR>=${LAST_LINE}" /tmp/codex-issue-create-review.txt
 
-  3. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。途中経過のBashOutputを見て独自に打ち切らない（完了通知を待つ）。
-  4. 異常終了の判定は完了通知が届いた後にのみ行う。出力ファイル冒頭に `codex` から始まる最終応答ブロックが無く、かつ exit code が 127 の場合は「Codex unavailable（codexコマンド未検出。PATHを確認）」と返す。それ以外で最終応答が無い場合は出力末尾のエラー行をそのまま返す。無理に再試行しない。
+  4. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。
+  5. 異常終了の判定は task が completed になった後にのみ行う。出力に `codex` から始まる最終応答ブロックが無く、かつ exit code が 127 の場合は「Codex unavailable（codexコマンド未検出。PATHを確認）」と返す。それ以外で最終応答が無い場合は出力末尾のエラー行をそのまま返す。無理に再試行しない。
   ```
 
   Codexプロンプト:

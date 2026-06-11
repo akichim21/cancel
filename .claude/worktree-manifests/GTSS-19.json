@@ -1,0 +1,30 @@
+{
+  "issueNumber": 19,
+  "branchName": "feature/GTSS-19",
+  "baseBranchOverride": "api-schema-refactor",
+  "worktreeDir": "feature-GTSS-19",
+  "slot": 6,
+  "ports": {
+    "api": 1344,
+    "admin": 3006,
+    "userPortal": 5179,
+    "lp": 5279
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/feature-GTSS-19",
+      "branch": "feature/GTSS-19",
+      "baseBranch": "api-schema-refactor"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

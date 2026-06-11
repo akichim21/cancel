@@ -80,7 +80,47 @@ service 側の読み出しコードは旧実装から不変。
 - **論理削除（ソフトデリート）**: `applications` に `deletedAt`（text, ISO8601）＋ `applications_deleted_at_idx` を持つ。削除は物理 DELETE せず、PII マスク + `deletedAt` セットの UPDATE（`applicationsRepo.softDelete`）。一覧取得（`getAll`）のみ `deletedAt IS NULL` で除外し、`getById` / `findAllWithShop`（請求の店舗名 JOIN）は削除済みも返す。マスク対象/保持対象カラムは `docs/product/application-flow.md` を参照。
 - **`application_id` の NOT NULL 化**: 論理削除化により親 `applications` が物理削除されず孤児が発生しないため、`cancellations.application_id` / `monthly_sales.application_id` を **NOT NULL** とする。FK は `cancellations`=`ON DELETE RESTRICT` / `monthly_sales`=`ON DELETE CASCADE` を維持。新規作成パス（cancellation 作成・月次 `upsertMonthly`）はいずれも `applicationId` 必須のため、NULL を投入し得る業務経路は無い。
 - **移行スクリプトの孤児スキップ**: `scripts/migrate-dynamodb-to-aurora.ts` は、親 `applications` に紐づかない孤児 cancellation / monthly_sales を**投入せずスキップ**し `orphans` 統計に計上する（NOT NULL 化に整合）。`userId→applicationId` のリネームは純粋関数 `toCancellationRow`、孤児判定・スキップは投入ループへ集約。
-- **スキーマ生成**: prod 未リリース前提で初期マイグレーション `0000_init.sql` と drizzle メタ（`meta/0000_snapshot.json` / `_journal.json`）を再生成して反映する。GIN trigram index に必須の `CREATE EXTENSION IF NOT EXISTS pg_trgm;` は先頭に保持する。
+- **スキーマ生成**: 初期マイグレーション `0000_init.sql` と drizzle メタ（`meta/0000_snapshot.json` / `_journal.json`）に全テーブルを集約する（`0000` は再生成方針）。`0000` 適用済み以降は**増分マイグレーション（`0001`〜）**で追加する（再生成しない）。GIN trigram index に必須の `CREATE EXTENSION IF NOT EXISTS pg_trgm;` は `0000` 先頭に保持する。
+
+## 申請削除フローの拡張: 退会化 / 顧客PIIマスク / バックアップ・restore・purge（GTSS-20）
+
+GTSS-19 の論理削除を拡張する。業務挙動の概要は `docs/product/application-flow.md` を参照。技術面の要点:
+
+- **退会（`withdrawn`）ステータス**: `applications.status` の enum に `withdrawn`（ラベル「退会」）を追加し、削除時に
+  `maskApplicationPii` の patch へ `status='withdrawn'` を含める（`deletedAt` は技術マーカーとして併存。一覧除外は
+  引き続き `deletedAt IS NULL`）。手動遷移禁止は `updateApplicationStatus` の**専用拒否分岐**（指定値が `withdrawn`、
+  または現ステータスが `withdrawn` のとき早期 400）で実装する（enum 包含チェックとは別レイヤ）。正規化/ラベルは
+  `application-enums.ts` の既存ヘルパーと整合（`退会`⇄`withdrawn`）。
+- **顧客 PII マスク（固定文字列）**: `cancellationsRepo.maskCustomerPiiByApplicationId(applicationId, '***')` で当該
+  applicationId の全 cancellations の顧客 3 列（`customerName/Email/Phone`）を `***` 上書き（NULL ではなく非 NULL）。
+  `cancellations_customer_name_trgm_idx` は `***` を索引するが実害なし。
+- **バックアップテーブル `application_deletion_backups`**: `id`(PK) / `application_id`(NOT NULL, index) /
+  `payload`(text NOT NULL, `{application, cancellations[]}` のマスク前 JSON) / `created_at`(NOT NULL) /
+  `expires_at`(NOT NULL, index, `created_at`+90日) / `restored_at`(NULL)。**FK は張らない**（マスク済み live 行と
+  疎結合に保ち purge が live 行に影響しない）。`expires_at` は ISO8601 UTC `Z` で辞書順=時系列順。
+- **削除フローの単一トランザクション**: `deleteApplication` は ① 未削除時のみ `createDeletionBackup`（マスク前
+  スナップショットを Stripe expire / canceled 化の前に取得）→ ③ `application_users` 物理削除 → ④ applications PII
+  マスク + `withdrawn` + `deletedAt` → ⑤ cancellations 顧客 PII マスク、を `getDb().transaction()` で原子化する
+  （② Stripe expire は外部副作用で Tx 外・best-effort）。repository は `markPaidIfNotPaid` と同様、末尾に executor
+  （`db = getDb()`）を受け取り tx を伝播する。aws-data-api ドライバ非対応時も順序＋冪等 UPDATE で再削除収束する。
+- **restore / purge サービス**（`application-backup.service.ts`、純粋関数 + 実 Postgres 統合の二層）:
+  `buildBackupPayload`（純）/ `computeExpiresAt`・`isBackupExpired`（90日境界・純）/ `createDeletionBackup` /
+  `restoreApplication(applicationId)`（未失効バックアップから PII・status・顧客 PII を復元し `deletedAt=NULL`。
+  email 一意衝突は Tx ロールバックで無変更・明示エラー。login は再作成しない）/ `purgeExpiredBackups(now)`
+  （`expiresAt <= now` のバックアップのみ物理削除）。
+- **batch Lambda**（`src/batch.ts`、HTTP の `handle(app)` とは別エクスポート）: `event.action` で
+  `purge-expired-backups` / `restore`（`applicationId` 指定）を dispatch。EventBridge Scheduler が毎月 3 日
+  JST 00:00 に purge を起動、restore は手動 `aws lambda invoke`。実行基盤は Terraform（`~/infra/cancel-billing-service-infra`
+  の `batch-compute` モジュール）。esbuild は `src/lambda.ts`→`dist/src/lambda.js` と `src/batch.ts`→`dist/src/batch.js`
+  を別出力する。
+- **NOT NULL 制約強化（REQ-9）**: 「全 insert 経路が値を入れ NULL シグナルを持たない列」に限定して NOT NULL 化:
+  `cancellations.customer_name/email/phone`（`***` マスク・`default('')` 併用）/ `applications.status` /
+  `application_users.must_change_password`（`default(false)`）。マスクで NULL 化する申請 PII（`email` は UNIQUE の
+  ため固定文字列マスク不可）・状態シグナル列・移行で NULL があり得る `created_at`/`updated_at` 等は対象外。
+- **増分マイグレーション `0001`**: バックアップテーブル追加 + 上記 NOT NULL 化。`ALTER COLUMN ... SET NOT NULL` は
+  既存 NULL があると失敗するため、drizzle-kit が生成しない**バックフィル UPDATE**（`customer_*`→`''` / `status`→
+  `'pending'` / `must_change_password`→`false`）を生成後 SQL に**手動で前置**する。aws-data-api（dev/prod）では
+  適用前に本番データの NULL 実在を確認する。
 
 ## 関連ドキュメント
 

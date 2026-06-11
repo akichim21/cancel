@@ -96,25 +96,28 @@ git log --oneline {baseBranch}..{targetBranch} > /tmp/verify-log-{短縮名}.txt
 
 `ask-codex` スキルを使い、Codexにも同じ調査を並列実行させる。
 
-**重要: Codex の出力には中間のツール呼び出し（rg, sed等の結果）が大量に含まれ、トークンを浪費する。必ず `model: "haiku"` サブエージェント経由で実行し、最終レスポンスのみを抽出して返すこと。**
+**重要: Codex の出力には中間のツール呼び出し（rg, sed等の結果）が大量に含まれ、トークンを浪費する。必ず `model: "sonnet"` サブエージェント経由で実行し、最終レスポンスのみを抽出して返すこと。** （haiku は「監視中」と途中報告してターンを終了してしまい結果を取得できない事故があったため sonnet を使う。lesson 参照）
 
 各対象リポジトリごとに個別のサブエージェントを起動する。
 
 サブエージェントへのプロンプト:
 ```
 以下の手順を実行し、Codexの最終調査結果のみを返してください。
+**最重要: awk抽出結果を返すまで絶対にターンを終了しないこと。「監視中」「完了したら抽出して返します」等の途中報告を最終メッセージにして終わるのは失敗とみなす。サブエージェントはバックグラウンドジョブ完了時に再呼び出しされない（=ターンを終えるとその時点で結果が永久に失われる）。必ず同一ターン内で同期的にブロックして待つこと。**
 
-1. 以下のコマンドをBashで実行する（タイムアウト300秒）。
-   **stdoutをファイルにリダイレクトすること。直接受け取るとCodexの中間出力（rg, sed結果等）でトークンを浪費する。**
+1. 以下のコマンドをBashで実行する。**`run_in_background: true` を指定すること**（codexは10分を超えることがあり前景timeout上限600000msを超えるため必須）。返ってくる task_id を控える。
+   **stdoutをファイルにリダイレクトし、stdinを/dev/nullに繋ぐこと（怠るとcodexがstdin待ちでhangする）。`timeout` コマンドは絶対に付けない（macOSに無くexit 127でcodexが一切実行されない）。**
 
-   codex exec -s read-only -C /Users/aki/cancel/{ディレクトリ名} "{Codexプロンプト}" > /tmp/codex-verify-testcases-{短縮名}.txt 2>&1
+   codex exec -s read-only -C /Users/aki/cancel/{ディレクトリ名} "{Codexプロンプト}" > /tmp/codex-verify-testcases-{短縮名}.txt 2>&1 < /dev/null
 
-2. 実行完了後、出力ファイルからCodexの最終レスポンスのみを抽出する:
+2. **同一ターン内で同期的に完了を待つ**: `TaskOutput({task_id, block: true, timeout: 600000})` を、status が completed になるまで繰り返し呼ぶ（completedでなければ再度呼ぶ）。待機中は最終メッセージを出さず、ターンを終了しない。途中経過のBashOutputを見て独自に打ち切らない。
+
+3. 完了後、出力ファイルからCodexの最終レスポンスのみを抽出する:
 
    LAST_LINE=$(grep -n "^codex" /tmp/codex-verify-testcases-{短縮名}.txt | tail -1 | cut -d: -f1)
    awk "NR>=${LAST_LINE}" /tmp/codex-verify-testcases-{短縮名}.txt
 
-3. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。
+4. awkの出力のみを返す。要約や加工は不要。出力ファイル自体をReadで読まないこと。
 ```
 
 Codexプロンプト:

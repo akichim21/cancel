@@ -1,0 +1,30 @@
+{
+  "issueNumber": 2,
+  "branchName": "feature/GTSS-13-vitest",
+  "baseBranchOverride": "feature/GTSS-13",
+  "worktreeDir": "feature-GTSS-13-vitest",
+  "slot": 3,
+  "ports": {
+    "api": 1341,
+    "admin": 3003,
+    "userPortal": 5176,
+    "lp": 5276
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service/.worktrees/feature-GTSS-13-vitest",
+      "branch": "feature/GTSS-13-vitest",
+      "baseBranch": "feature/GTSS-13"
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

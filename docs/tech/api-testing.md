@@ -90,6 +90,24 @@ Stripe/Twilio クライアントはキー未設定だとロード時に例外を
   - Lambda handler（`hono/aws-lambda` の `handle(app)`）が API Gateway プロキシ event を処理し
     `{ statusCode, headers/multiValueHeaders, body }` を返すこと。
 
+## バッチ（restore / purge）のテスト方針（GTSS-20）
+
+申請削除バックアップのバッチ処理は **純粋関数 unit + 実 Postgres 統合の二層**で担保する。
+
+- **純粋関数 unit**（`src/__tests__/unit/application-backup.test.js`）: `buildBackupPayload`
+  （`application + cancellations[]` → JSON ペイロード）、`computeExpiresAt`（+90日）、
+  `isBackupExpired`（90 日境界: 89=残す / ちょうど90=削除 / 91=削除。`expiresAt <= now`）。DB 非依存で
+  境界値を固定する。
+- **統合（実 Postgres）**（`src/__tests__/e2e/application-deletion-backup.test.js`）: `app.request()` の
+  `DELETE` 操作と、バッチ service（`restoreApplication` / `purgeExpiredBackups`）の直呼びを組み合わせ、
+  顧客 PII マスク（`***`）/ バックアップ生成・冪等ガード / restore（PII・status・`deletedAt=NULL` 復元、
+  email 一意衝突、login 非再作成）/ purge（期限切れのみ削除・live 無傷）/ `withdrawn` 手動遷移拒否 /
+  status ルート認可（401/403/200）を検証する。スキーマの NOT NULL 制約は `schema.test.js`
+  （`information_schema` の `is_nullable='NO'` + NULL insert 拒否）で担保。
+- **テスト隔離**: `helpers/db.js` の `truncateAll` に `application_deletion_backups` を含める。
+- **自動化困難（人力）**: EventBridge スケジュールの実発火・`aws lambda invoke` での restore 運用・
+  `terraform plan`（AWS 認証前提）は人力スモーク（下記）/ インフラ側で確認する。
+
 ## 画面 E2E（Playwright）非対象の理由
 
 本リポジトリは HTTP API のみで画面を持たない。レスポンス契約・ルーティング・認可は

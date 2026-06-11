@@ -1,0 +1,41 @@
+{
+  "issueNumber": 20,
+  "branchName": "feature/GTSS-13-mask",
+  "baseBranchOverride": "feature/GTSS-13",
+  "worktreeDir": "feature-GTSS-13-mask",
+  "slot": 0,
+  "ports": {
+    "api": 1338,
+    "admin": 3000,
+    "userPortal": 5173,
+    "lp": 5273
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/feature-GTSS-13-mask",
+      "branch": "feature/GTSS-13-mask",
+      "baseBranch": "feature/GTSS-13"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/feature-GTSS-13-mask",
+      "branch": "feature/GTSS-13-mask",
+      "baseBranch": "feature/GTSS-13"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  },
+  "extraRepos": {
+    "cancel-billing-service-infra": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/infra/cancel-billing-service-infra/.worktrees/feature-GTSS-13-mask",
+      "branch": "feature/GTSS-13-mask",
+      "baseBranch": "feature/GTSS-13"
+    }
+  }
+}

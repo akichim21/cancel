@@ -54,8 +54,11 @@ GitHub Issueベースの実装作業時は、GitHub Issueコメントとして�
 - 「サロン」= サービス利用者（美容室・サロン事業者）
 - 「申請」= サロンが利用申し込みするフロー。LP のフォームから登録 → 審査 → Stripe Connect オンボーディング → 利用開始
 - 「キャンセル請求」= 顧客のドタキャン分をサロンに代わって請求する。`cancellations` テーブルで管理
-- 「申請ステータス」: `GTSS審査中` → `Stripe登録待ち` → `オンボーディング待ち` → `利用中` / `却下済み`
-  - 定数定義: `cancel-billing-service-api/src/lambda.js` の `APPLICATION_STATUS`
+- 「申請ステータス」: DB/API は英語 enum、表示は日本語ラベル
+  `pending`(GTSS審査中) → `approved`(Stripe登録待ち) → `onboarding`(オンボーディング待ち) → `active`(利用中) / `rejected`(却下済み)
+  - 定数定義・正規化: `cancel-billing-service-api/src/constants/application-enums.ts`（`src/config` / `src/lambda` から再 export）
+  - 事業区分も英語 enum: `corporate`(法人) / `individual`(個人)
+  - API レスポンスは `status` + `statusLabel`（`entityType` + `entityTypeLabel`）を返す
 
 ### 主要外部サービス
 

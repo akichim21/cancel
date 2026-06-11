@@ -53,36 +53,74 @@
 - ログイン後: JWT を localStorage に保存（有効期限 24 時間）
 - 初期パスワード変更を推奨（`ChangePasswordPage.tsx`）
 
-## 申請の削除（論理削除 / ソフトデリート）
+## 申請の削除（論理削除 / 退会化 + 顧客PIIマスク + 90日バックアップ）
 
 運営管理者が管理画面から申請（サロン）を削除する操作は、**物理削除ではなく論理削除**で行う。
-キャンセル請求（請求書データ）や法人情報は会計・監査のために残しつつ、個人情報のみを消去する。
+削除済みサロンを業務ステータス「退会（`withdrawn`）」で明示しつつ、サロン本人の個人情報と
+**キャンセル請求の顧客 PII（氏名/電話/メール）も消去**して PII 露出を最小化する。一方で誤削除に
+備え、**マスク前の元データを 90 日間バックアップ**して `applicationID` 指定で復元できるようにする
+（90 日経過後は復元用バックアップを物理削除して PII を恒久消去）。会計・監査に必要な請求書本体
+（金額・明細）は引き続き保持する（GTSS-20 で GTSS-19 の論理削除を拡張）。
 
-### 削除時の挙動（`DELETE /applications/:id`）
+### 削除時の挙動（`DELETE /applications/:id`、管理者専用）
 
-1. 当該申請に紐づく**未決済キャンセル請求**（`sent` / `pending`）の Stripe チェックアウトセッションを expire し、ステータスを `canceled` に更新する。
-2. 当該申請の**ログインアカウント（application_users）を物理削除**する（ログイン経路を確実に塞ぐ）。これに伴い `cancellations.created_by_application_user_id` は FK（`ON DELETE SET NULL`）で NULL になる。
-3. 申請レコードは**残したまま**、個人情報をマスク（NULL 上書き）し、削除マーカー `deletedAt`（ISO8601）をセットする。
-4. 申請一覧（`GET /applications`）からは `deletedAt` がセット済みの申請を除外する。詳細取得・請求の店舗名解決（JOIN）では削除済み申請も参照できる。
+1. **マスク前の元データ**（application 全カラム + 紐づく全 cancellations）を **JSON 1 レコードのバックアップ**
+   （`expiresAt` = 削除時刻 + 90 日）として保存する。**未削除（`deletedAt` が NULL）のときのみ**生成し、
+   再削除では二重生成・`expiresAt` 延長をしない（「マスク前データを 1 度だけ」保証）。
+2. 当該申請に紐づく**未決済キャンセル請求**（`sent` / `pending`）の Stripe チェックアウトセッションを
+   expire し、ステータスを `canceled` に更新する。
+3. 当該申請の**ログインアカウント（application_users）を物理削除**する（ログイン経路を確実に塞ぐ）。
+   これに伴い `cancellations.created_by_application_user_id` は FK（`ON DELETE SET NULL`）で NULL になる。
+4. 申請レコードは**残したまま**、申請 PII をマスク（NULL 上書き）し、**`status='withdrawn'`（退会）** へ変更、
+   削除マーカー `deletedAt`（ISO8601）をセットする。
+5. 紐づく**全 cancellations の顧客 PII（氏名/メール/電話）を固定マスク文字列 `***`** で上書きする
+   （金額・明細・applicationId・Stripe 関連は保持）。
 
-既に削除済みの申請を再削除しても**冪等に成功**する（再マスクで壊れない）。
+①③④⑤の DB 副作用は可能な範囲を単一トランザクションで原子化する（②の Stripe expire は外部副作用で
+Tx 外・best-effort）。既に削除済みの申請を再削除しても**冪等に成功**する（再マスク・再 withdrawn で壊れない）。
 
 ### マスク対象 / 保持対象
 
 | 区分 | カラム | 扱い |
 |---|---|---|
-| 常にマスク（NULL） | `email`, `phone`, `representativeName`(代表者名), `contactName`(担当者名), `birthDate`(生年月日) | 個人情報のため消去 |
-| 条件付きマスク | `partnerName` / `partnerNameKana` | `entityType==='個人'`（個人事業主本人の氏名）→ マスク。`'法人'`（法人名）→ 保持 |
-| 保持 | `businessName`(屋号), `corporateNumber`(法人番号), `tRegistrationNumber`(インボイス登録番号), 住所(`zip`/`prefecture`/`city`/`address`/`building`), `entityType`, `status`, Stripe 系 | 会計・請求履歴のため保持 |
-| 保持 | キャンセル請求（`cancellations`） | 請求書データとして保持（行は削除しない） |
+| 常にマスク（NULL） | `applications.email`, `phone`, `representativeName`(代表者名), `contactName`(担当者名), `birthDate`(生年月日) | 個人情報のため消去 |
+| 条件付きマスク | `applications.partnerName` / `partnerNameKana` | `entityType==='個人'`（個人事業主本人の氏名）→ マスク。`'法人'`（法人名）→ 保持 |
+| **マスク（固定文字列 `***`）** | `cancellations.customerName` / `customerEmail` / `customerPhone` | 請求の顧客 PII を消去（NULL ではなく `***`。当該 3 列は NOT NULL） |
+| ステータス変更 | `applications.status` → `withdrawn`（退会） | 退会は削除でのみ到達する内部遷移（手動変更不可） |
+| 保持 | `businessName`(屋号), `corporateNumber`(法人番号), `tRegistrationNumber`(インボイス登録番号), 住所, `entityType`, Stripe 系 | 会計・請求履歴のため保持 |
+| 保持 | キャンセル請求の金額・明細・`applicationId`・Stripe 関連 | 請求書本体として保持（行は削除しない） |
+
+### 退会（withdrawn）ステータスのライフサイクル
+
+- 退会は**削除操作によってのみ到達**する内部遷移ステータス（ラベル「退会」）。
+- 管理画面の手動ステータス変更・API のステータス更新（`PUT /applications/:id/status`）からは
+  **到達も離脱もできない**（指定 / 現ステータスが `withdrawn` のとき 400 拒否）。
+- 申請一覧（`GET /applications`）の除外は従来どおり **`deletedAt IS NULL`** ベース（status には依存しない）。
+- 管理画面のステータス絞り込み（フィルタ）選択肢には退会を出さない（退会申請は一覧に通常出現しない）。
+
+### 復元（restore）と 90日経過削除（purge）
+
+- **restore（手動バッチ、`applicationID` 指定）**: 未失効バックアップから申請 PII・`status`（元値を無条件に
+  書き戻し）・顧客 PII を復元し、`deletedAt` を NULL に戻す（一覧へ再表示）。バックアップ非存在/失効時は
+  エラーで何も変更しない。`applications.email` の一意制約と衝突する場合（削除後に同一 email で別申請が
+  作成された等）は復元せず明示エラー。**ログインアカウント（application_users）は再作成しない**（確定）。
+  利用再開にはパスワード再発行 / 再オンボーディングを運用で実施する。
+- **purge（毎月 3 日 JST 00:00 の自動バッチ）**: `expiresAt <= 現在` のバックアップレコードのみを物理削除する
+  （マスク済みの live な applications/cancellations 行は無傷）。以後そのサロンは復元不可（PII は恒久消去）。
 
 ### 副次的な仕様
 
-- **ログイン遮断**: application_users を物理削除するため、削除後のサロンはログイン不可（401）。`applications.status` は変更しない（`deletedAt` を削除判定の唯一の真実とする）。
-- **店舗名表示の劣化**: 個人事業主を削除すると `partnerName` が NULL になり、請求履歴一覧の店舗名は `businessName`(屋号)→無ければ `不明` で解決される。法人は法人名を保持するため影響なし。
-- **同一 email の再申請**: `email` を NULL マスクするため、削除済みサロンと同一 email での再申請が可能になる（PII 消去の帰結として許容）。
+- **ログイン遮断**: application_users を物理削除するため、削除後のサロンはログイン不可（401）。`status` は
+  退会へ変更するが、一覧除外の判定は引き続き `deletedAt`（削除判定の技術マーカー）が担う。
+- **店舗名表示の劣化**: 個人事業主を削除すると `partnerName` が NULL になり、請求履歴一覧の店舗名は
+  `businessName`(屋号)→無ければ `不明` で解決される。法人は法人名を保持するため影響なし。
+- **同一 email の再申請**: `email` を NULL マスクするため、削除済みサロンと同一 email での再申請が可能。
+  ただしその後に元サロンを restore しようとすると email 一意衝突で復元失敗となる。
 
-> 実装: `cancel-billing-service-api/src/services/application.service.ts`（`deleteApplication` / `maskApplicationPii`）、`src/repositories/applications.repository.ts`（`getAll` の `deletedAt IS NULL` フィルタ / `softDelete`）。技術面は `docs/tech/api-architecture.md` を参照。
+> 実装: `cancel-billing-service-api/src/services/application.service.ts`（`deleteApplication` / `maskApplicationPii`）、
+> `src/services/application-backup.service.ts`（`createDeletionBackup` / `restoreApplication` / `purgeExpiredBackups`）、
+> `src/repositories/{applications,cancellations,application-deletion-backups}.repository.ts`、`src/batch.ts`（バッチ
+> エントリ）。技術面・インフラは `docs/tech/api-architecture.md` を参照。
 
 ## 関連コード
 
