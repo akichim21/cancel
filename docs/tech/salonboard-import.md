@@ -75,7 +75,9 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
    - 元データのメール・電話が両方無し → `no_contact`。
    - 料率解釈不能 → `rate_unparseable`。
    - それ以外 → **非 prod PII マスク**して `pre_send`（送信前）で `cancellations` を作成。
-5. 結果（対象店舗数・店舗別 作成/対象外スキップ/失敗 件数）を集計して返す。
+5. 結果（対象店舗数・店舗別 作成/対象外スキップ/失敗 件数）を集計して返す。あわせて実行単位の結果を
+   `external_import_runs` に必ず記録する（`triggerType`・店舗別内訳・失敗 error を含む）。店舗ループ以前の
+   致命的失敗（店舗一覧取得失敗等）も握り潰さず `ok:false` で記録する（記録自体の失敗は取り込みを壊さない）。
 
 ### 請求金額の算出（REQ-2 / `cancellation-fee.ts`）
 
@@ -114,13 +116,22 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
 ## データモデル
 
 - `cancellations` 新カラム: `source` / `externalShopId`(FK→`external_shops`) / `externalReservationId` /
-  `reservationStatus` / `cancellationType` / `paymentType` / `cancellationPolicy` / `receivedAt` / `customerNameKana`。
+  `reservationStatus` / `cancellationType` / `paymentType` / `cancellationPolicy` / `receivedAt` / `customerNameKana` /
+  `externalCanceledAt`（キャンセル日。サロンボード一覧の更新日時。`createdAt`＝取り込み実行日とは別。一覧・詳細・
+  送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
   **冪等キー**: `(external_shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
   手動作成（両 NULL）は NULLS DISTINCT で対象外。別店舗の同一予約 ID は別請求として作成される。
 - `external_shops`: 会社→店舗 1:N。`(applicationId, source, externalStoreId)` UNIQUE で upsert。
+  再連携時に今回取得されなかった既存店舗を `linked=false` にする（閉店・除外された店舗を取り込み対象から外す）。
 - `external_integrations`: 会社×連携元で 1 行。`loginId` + `encryptedSecret`（envelope）+ `linked`。
 - `external_import_logs`: 対象外/スキップの生データ（payload JSON）+ 理由 + 対象期間。
   `(externalShopId, externalReservationId)` UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
+  作成成功（リトライ成功）時は当該予約のログ行を削除し、キャンセル一覧との矛盾を解消する。
+- `external_import_runs`: **取り込みの実行単位ログ**（日次/手動の各実行 1 行）。`triggerType`（`scheduled`/`manual`）/
+  `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) / `shops`(JSON・店舗別の内訳＋失敗 error) /
+  `error`（実行全体の致命的失敗） / `startedAt` / `finishedAt`。会社をまたぐ実行単位のため FK なし。集計値のみで PII を
+  含まない。EventBridge の非同期 invoke では戻り値が破棄されるため、実行結果をここへ永続化して後から確認でき、
+  特定店舗の継続失敗に運営が気づけるようにする（管理画面「取り込み実行履歴」/ `GET /import-runs`）。
 
 ## 退会（申請削除）時のマスク
 
@@ -132,6 +143,18 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
 `src/batch.ts` の `action='salonboard-import'`。EventBridge Scheduler `cron(10 0 * * ? *)` + `Asia/Tokyo`
 （JST 0:10。infra `modules/batch-compute` の `salonboard_import` スケジュール）。取り込みは通知を出さないため
 `initClients()` 不要だが、外部 HTTP egress と認証情報復号の KMS 権限が必要。詳細は `docs/tech/batch-jobs.md`。
+
+実行結果は `external_import_runs` テーブルへ記録するのに加え、CloudWatch Logs Insights で `shops[].failed` /
+`error` を抽出・アラート化できるよう構造化ログ（JSON 1 行）も出力する（非同期 invoke では戻り値が破棄されるため
+二重で可視化する）。スケジュール起動は `trigger='scheduled'`、API からの手動委譲は `trigger='manual'`。
+
+### 手動取り込み（REQ-4）
+
+`POST /cancellations/import`（運営のみ）。**dev/prod**は全会社・全店舗のクローリングが API Gateway の
+29 秒制限を超えうるため、batch Lambda（`action='salonboard-import'`, `trigger='manual'`）へ**非同期 Invoke**
+（`InvocationType='Event'`）で委譲し、`202 { success, started:true }` を即返す。件数は同期返却できないため、admin は
+「取り込み実行履歴」（`external_import_runs`）と一覧で結果を確認する。**local/test**は batch Lambda が無いため
+同期実行し件数を返す。non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunction` 権限が必要。
 
 ## テスト
 
