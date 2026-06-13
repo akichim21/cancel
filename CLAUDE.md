@@ -122,6 +122,22 @@ cd cancel-billing-service-lp && ./deploy.sh dev        # / prod
 - `cancel-billing-service-admin` の API URL 変数は `VITE_API_BASE_URL`（`VITE_API_URL` ではない）
 - `cancel-billing-service-lp` の API URL 変数は `VITE_API_URL`
 
+## 個人情報（PII）の取り扱い
+
+顧客・サロンスタッフの氏名/カナ/電話/メール、外部連携（サロンボード等）のログインID・パスワード・店舗ID/店舗名は個人情報・機微情報として扱う。**表示・DB保存・HTML保存の3場面で必ず以下を守ること。**
+
+- **表示（admin / user portal / API レスポンス）**
+  - 外部連携のパスワードは**平文・暗号 blob を絶対に画面・レスポンスへ出さない**。有無のみ（`hasPassword: boolean`）を返す（実装例: `salonboard-auth.service.ts` の `getSalonboardIntegration`）。
+  - 顧客 PII は権限のある運営（`requireAdmin`）にのみ表示する。サロン本人向けレスポンスは連携有無・件数など最小限に絞る。
+  - **非本番環境（local/dev/test）では取り込み経路で顧客 PII（氏名・カナ・メール・電話）をマスク／ダミー置換**する（`docs/product/application-flow.md` のマスク方針。会社単位・店舗単位どちらの取り込みでも同じマスクを効かせる）。
+- **DB保存（Aurora）**
+  - 外部連携の認証情報（パスワード）は **AES-256-GCM envelope で暗号化**して保存する（`utils/crypto.ts` の `encryptSecret`）。平文では保存しない。
+  - 申込の論理削除時は顧客 PII をマスクする（#GTSS-19 / `application-flow.md`）。
+- **HTML保存（テスト fixture）**
+  - サロンボード等の**実 HTML を fixture 化する際は、コミット前に個人情報を必ず別値へ置換**する。対象: 顧客 氏名/カナ/電話/メール、**サロンスタッフ名**、ログイン/管理者ID（`CDxxxxx`）、店舗ID（`Hxxxxxx`）、店舗名、KMAGIC / login-key 等のトークン、第三者キー（Sentry DSN 等）。置換後に元値が残っていないことを grep で検証する。
+  - 実ログイン情報は **gitignore 済みの `.login.json`（会社単位）/ `.login-store.json`（店舗単位）** にのみ置く（`userId` / `password` の JSON）。コミット・ログ出力・コメント投稿に実値を含めない。
+  - fixture 置換例: ログインID `CD00000`、店舗ID `H000999001`、店舗名 `テストサロン …`、スタッフ名 `テスト担当`。
+
 ## ドキュメント参照ルール
 
 - `docs/product/`: 製品仕様（全アプリ横断）

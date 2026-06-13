@@ -28,6 +28,14 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 **店舗名では判別不可**（実例: 店名「GO TODAY シェアサロン 札幌Alba店」がキレイサロン区分 `kireiStoreInfoArea` に在籍）。
 各行から サロンID（`H000…`）＋店舗名を取得（`parseHairSalons`）。ログイン成功（`userid` 非空）かつヘアサロン 1 件以上で連携成功。
 
+### 店舗単位連携の単一店舗自動取得（REQ-8・#23・2026-06-13 実証）
+
+店舗単位連携は **ログインの成否のみ**を確認し、単一店舗の店舗ID・店舗名を自動取得する（多店舗の一覧クロール・確認画面は使わない）。実アカウント2種で挙動を実証:
+- **会社アカウント**（`CD34512`）: groupTop に `biyouStoreInfoArea`（14店舗）。`parseHairSalons` が **2件以上** → 会社アカウントと判定しエラー（会社単位連携を促す・未保存）。
+- **単一店舗アカウント**（`CD77768`）: `POST /CNC/groupTop/` は **システムエラー画面**（`biyouStoreInfoArea` 無し、`parseHairSalons`=0）を返すが、hidden `<input name="STORE_ID" value="H…">` に唯一の店舗IDを埋め込む。続けて `POST /CLP/bt/top/`（`isViaLogin=true`・forward 不要）で店舗TOPが返り、`sc_data` の `"storeid":"H…"` ＋ パンくず（`class="path"` 内 `{店舗名}様 / {店舗ID} / …`）から店舗ID・店舗名を取得（`parseStoreTop`）。
+- 判定フロー: `parseHairSalons>=2`→会社エラー / `==1`→その1店舗を採用 / `==0`→店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存）。ログイン失敗もエラー・未保存。
+- パーサ: `extractHiddenStoreId`（hidden STORE_ID）/ `parseStoreTop`（店舗TOP）。fixture: `group-top-single-store.html` / `store-top-single.html`（PII置換済み）。
+
 ### 一覧 GraphQL（REQ-2/3）と persisted query の自動復旧
 
 - `Content-Type: application/graphql+json`、body は `{"query":"<32桁hex id>","variables":{…}}`（サーバは persisted `id` を `query` フィールドで受ける。完全クエリ文字列でも可）。
@@ -121,17 +129,25 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
   送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
   **冪等キー**: `(external_shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
   手動作成（両 NULL）は NULLS DISTINCT で対象外。別店舗の同一予約 ID は別請求として作成される。
-- `external_shops`: 会社→店舗 1:N。`(applicationId, source, externalStoreId)` UNIQUE で upsert。
-  再連携時に今回取得されなかった既存店舗を `linked=false` にする（閉店・除外された店舗を取り込み対象から外す）。
-- `external_integrations`: 会社×連携元で 1 行。`loginId` + `encryptedSecret`（envelope）+ `linked`。
-- `external_import_logs`: 対象外/スキップの生データ（payload JSON）+ 理由 + 対象期間。
-  `(externalShopId, externalReservationId)` UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
+- `shops`（#23 で `external_shops` から**リネーム**。FK カラム名 `external_shop_id`/`external_store_id` は不変）:
+  会社→店舗 1:N。`(applicationId, source, externalStoreId)` UNIQUE で upsert。会社単位の再連携時は今回取得されな
+  かった既存店舗を `linked=false` にする。店舗単位では運営が店舗を個別に作成・更新・削除する（店舗CRUD API）。
+- `external_integration_settings`（#23 新規）: `(application_id, source)` PK・`unit`（`company`/`shop`）。連携単位を
+  `(会社, source)` 単位で保持。**行が無い場合は既定 `shop`**。lock（変更不可）はカラムを持たず、当該 `(会社, source)` の
+  `external_integrations.linked=true` または `shops.linked=true` が1件でもあれば**導出**する（lock の唯一条件は `linked=true`）。
+- `external_integrations`: `loginId` + `encryptedSecret`（envelope）+ `linked` + nullable `external_shop_id`（#23 追加・
+  FK→`shops.id` ON DELETE CASCADE）。会社単位は `external_shop_id IS NULL` の1行、店舗単位は店舗ごとに1行。
+  UNIQUE は `(application_id, source, external_shop_id)` **NULLS NOT DISTINCT**（PG15+。会社行の NULL を1行に制約）。
+- `external_import_logs`: 対象外/スキップの生データ（payload JSON）+ 理由 + 対象期間。`application_id` カラムで会社
+  フィルター可。`(externalShopId, externalReservationId)` UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
   作成成功（リトライ成功）時は当該予約のログ行を削除し、キャンセル一覧との矛盾を解消する。
-- `external_import_runs`: **取り込みの実行単位ログ**（日次/手動の各実行 1 行）。`triggerType`（`scheduled`/`manual`）/
-  `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) / `shops`(JSON・店舗別の内訳＋失敗 error) /
-  `error`（実行全体の致命的失敗） / `startedAt` / `finishedAt`。会社をまたぐ実行単位のため FK なし。集計値のみで PII を
-  含まない。EventBridge の非同期 invoke では戻り値が破棄されるため、実行結果をここへ永続化して後から確認でき、
-  特定店舗の継続失敗に運営が気づけるようにする（管理画面「取り込み実行履歴」/ `GET /import-runs`）。
+- `external_import_runs`: **取り込みの実行単位ログ**。#23 で **会社（＋source）ごとに1行**へ変更（nullable `application_id`
+  ＋index 追加。過去行は NULL のままバックフィルせず、`?applicationId=` フィルター時は除外・無指定では全社表示）。
+  `triggerType`（`scheduled`/`manual`）/ `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) /
+  `shops`(JSON・店舗別の内訳＋失敗 error) / `error` / `startedAt` / `finishedAt`。集計値のみで PII を含まない。
+  管理画面「取り込み実行履歴」/ `GET /import-runs?applicationId=`。
+- **マルチソース**: 上記すべてが `source` を含むため、同一会社で `salonboard`/`rakuten_beauty`/`own_site` 等の
+  レコードが衝突せず並列に保持できる（連携単位設定も source ごとに独立）。
 
 ## 退会（申請削除）時のマスク
 
@@ -148,19 +164,39 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
 `error` を抽出・アラート化できるよう構造化ログ（JSON 1 行）も出力する（非同期 invoke では戻り値が破棄されるため
 二重で可視化する）。スケジュール起動は `trigger='scheduled'`、API からの手動委譲は `trigger='manual'`。
 
-### 手動取り込み（REQ-4）
+### 手動取り込み（REQ-4/9・#23 で申請単位化）
 
-`POST /cancellations/import`（運営のみ）。**dev/prod**は全会社・全店舗のクローリングが API Gateway の
-29 秒制限を超えうるため、batch Lambda（`action='salonboard-import'`, `trigger='manual'`）へ**非同期 Invoke**
-（`InvocationType='Event'`）で委譲し、`202 { success, started:true }` を即返す。件数は同期返却できないため、admin は
-「取り込み実行履歴」（`external_import_runs`）と一覧で結果を確認する。**local/test**は batch Lambda が無いため
-同期実行し件数を返す。non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunction` 権限が必要。
+`POST /cancellations/import`（運営のみ）。#23 で **`applicationId` 必須**の会社スコープ実行に変更（無指定は 4xx。
+全社一括の手動実行は廃止し、会社詳細のキャンセル請求管理タブから**その会社のみ**起動する）。**dev/prod**は batch Lambda
+（`action='salonboard-import'`, `trigger='manual'`）へ当該 `applicationId` をスコープに**非同期 Invoke**（`InvocationType='Event'`）
+で委譲し、`202 { success, started:true }` を即返す。件数は同期返却できないため、admin は「取り込み実行履歴」
+（`external_import_runs`）と一覧で結果を確認する。**local/test**は batch Lambda が無いため同期実行し件数を返す。
+non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunction` 権限が必要。
+
+### 連携単位・店舗CRUD API（#23・すべて `requireAdmin`）
+
+- `GET /admin/shops?applicationId=` — 当該会社の店舗一覧。
+- `POST /admin/shops` `{applicationId, source?, loginId, password, shopName?}` — 店舗単位の作成（店舗単位verify→1Txで店舗＋
+  店舗単位認証情報を保存・`linked=true`）。連携単位が `company` の `(会社,source)` は 4xx 拒否。
+- `PUT /admin/shops/:id` `{shopName?, loginId?, password?}` — 表示名更新／再連携（同一店舗ID upsert）。
+- `DELETE /admin/shops/:id` — 店舗削除（FK CASCADE で店舗単位認証情報も削除。`cancellations`/`external_import_logs` は
+  `external_shop_id` が SET NULL で残る）。`company` は 4xx 拒否。
+- `POST /admin/salonboard/shop-verify` `{applicationId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
+  店舗一覧は返さない・会社アカウント/取得不可はエラー）。
+- `PUT /admin/applications/:applicationId/integration-unit?source=salonboard` `{unit}` — 連携単位の設定。lock 済みは 4xx
+  （同一単位の再送は冪等成功）。
+- `GET /admin/salonboard/integration/:applicationId` — レスポンスに `unit`/`unitLocked` を追加。
+- 一覧3系統 `GET /cancellations|/import-logs|/import-runs` に任意 `?applicationId=` フィルター（無指定は全件＝後方互換）。
 
 ## テスト
 
-- unit: `cancellation-status` / `crypto-secret`（envelope ラウンドトリップ）/ `salonboard-parser`（fixture）/
-  `cancellation-fee`（料率算出・境界）/ `import-window`（抽出窓・契約日境界）/ `mask-imported-pii`。
+- unit: `cancellation-status` / `crypto-secret`（envelope ラウンドトリップ）/ `salonboard-parser`（fixture。#23 で
+  `extractHiddenStoreId`/`parseStoreTop` の店舗単位パースを追加）/ `cancellation-fee`（料率算出・境界）/
+  `import-window`（抽出窓・契約日境界）/ `mask-imported-pii`。
 - e2e（`app.request()` + fake client 注入 + fixture）: 連携検証/保存（`salonboard-integration`）/
   取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・並列上限（`salonboard-import`）/ 送信・手動取り込み・
   バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
+  **#23 追加**: 店舗単位 verify/save・店舗CRUD・連携単位/lock・一覧の `applicationId` フィルター・実行記録の会社単位化・
+  マルチソース独立・リネーム回帰（`external_shops`→`shops`）。
 - fixture（`src/__tests__/fixtures/salonboard/`）は実 HTTP 採取レスポンスを**PII マスクして**作成（生 PII は非コミット）。
+  #23 で `group-top-single-store.html`（単一店舗の groupTop システムエラー）/ `store-top-single.html`（店舗TOP）を追加。
