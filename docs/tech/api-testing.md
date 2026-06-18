@@ -50,8 +50,8 @@ npm run test:coverage
 
 | 依存 | 手法 | 理由 |
 |------|------|------|
-| DynamoDB (`docClient.send`) | `aws-sdk-client-mock`（`mockClient(DynamoDBDocumentClient)`） | クライアントの `send` を実行時にスタブ。コマンド別に `.on(GetCommand, { TableName }).resolves(...)` で制御 |
-| SES (`sesClient.send`) | `aws-sdk-client-mock`（`mockClient(SESClient)`） | 同上。送信引数を `commandCalls` で検証 |
+| PostgreSQL (Drizzle) | **実 Postgres**（docker-compose.test.yml の `postgres:17-alpine`） | unit を除く全テストは実 DB に対して動作。globalSetup で Drizzle migration を適用し、各テストは `beforeEach` で `truncateAll()` 隔離する。FK 制約により `TRUNCATE ... CASCADE` で全テーブルをクリアする |
+| SES (`sesClient.send`) | `aws-sdk-client-mock`（`mockClient(SESClient)`） | クライアントの `send` を実行時にスタブ。送信引数を `commandCalls` で検証 |
 | Stripe | `lambda.__setTestClients` による実行時注入 | node_modules（CJS）の `require('stripe')` は vitest の `vi.mock` で差し替えられない（外部化され実体が解決される）。`aws-sdk-client-mock` と同様に実行時注入する |
 | Twilio | `lambda.__setTestClients` による実行時注入 | 同上 |
 | Nodemailer (SMTP) | 不要 | `NODE_ENV !== 'prod'` のため SMTP 経路は通らない（SES を使用） |
@@ -69,9 +69,19 @@ npm run test:coverage
 
 ### env プリセット
 
-`setup.js`（`setupFiles`）でモジュール評価前に `JWT_SECRET` / `DYNAMODB_TABLE_NAME` /
+`setup.js`（`setupFiles`）でモジュール評価前に `JWT_SECRET` / `DATABASE_URL` /
 `CORS_ORIGIN` / `STRIPE_SECRET_KEY=sk_test_...` / `NODE_ENV=test` / `TWILIO_*` を設定する。
 Stripe/Twilio クライアントはキー未設定だとロード時に例外を投げるため、生成自体は通す。
+
+### FK 制約と TRUNCATE 順（GTSS-17）
+
+REQ-7 で `application_users.application_id` / `cancellations.application_id` /
+`monthly_sales.application_id` / `cancellations.created_by_application_user_id` の FK 制約が
+追加された。`helpers/db.js` の `truncateAll()` は `TRUNCATE ... RESTART IDENTITY CASCADE` を
+使うため親子の順序は不問だが、`application_users` を新規対象テーブルに含めている。
+
+サロン側 JWT が `application_id` クレームを持たない旧トークンには middleware が 401 を返すため、
+テスト用 JWT helper（`helpers/auth.js`）は新仕様の `{ sub, application_id, email, role }` を発行する。
 
 ## テストレイヤと担保範囲
 
