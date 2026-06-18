@@ -5,10 +5,16 @@
 
 **通信トランスポートは 2 系統あり `SALONBOARD_TRANSPORT` で切り替える（#22）:**
 - `http`（既定）: pure HTTP + cookie セッション + 軽量 HTML/JSON パース（headless ブラウザ不使用）。
+  **Decodo プロキシにも対応**（undici `ProxyAgent` を fetch の `dispatcher` に渡す。proxy 未設定時は直結）。
+  実測（2026-06-18）で **pure HTTP + JP 住宅プロキシは Akamai に遮断されず**、ログイン〜保護エンドポイントまで
+  通常応答が返る（`doLogin` が CAPTCHA ではなくアプリのログイン結果ページを返す）。**Chromium 不要で Lambda が
+  軽量**（memory/timeout 小・コールドスタート短）なため、HTTP + proxy が実運用の第一候補。
 - `playwright`: 実ブラウザ（Chromium）で Akamai の JS を実行して `_abck` を正規取得し、**Decodo 住宅/モバイル
-  スティッキープロキシ（JP 固定）経由**で通信する。**AWS Lambda の egress IP は Akamai にネットワークレベルで
-  遮断される（実測: `salonboard.com` へ TimeoutError）ため、dev/prod の実運用では playwright + プロキシが前提**。
-  ただし Chromium 実行環境（Lambda + `@sparticuz/chromium` 等）の配線は後続のため、既定は `http` のまま。
+  スティッキープロキシ（JP 固定）経由**で通信する。Akamai が JS チャレンジへ昇格して pure HTTP で突破不能に
+  なった場合の**フォールバック**として位置づける。
+- **AWS Lambda の egress IP は Akamai にネットワークレベルで遮断される（実測: `salonboard.com` へ TimeoutError）
+  ため、dev/prod では http/playwright いずれもプロキシ必須**（`requireSalonboardProxy` が未設定時 throw）。
+  既定は `http` のまま。
 
 どちらのトランスポートでも `SalonboardClient` interface（login / enterStore / 一覧 / 詳細）と取り込みロジック
 （抽出窓・料率算出・冪等・PII マスク・理由ログ）は共通。レスポンスは生 HTML/JSON で返し、解析は
@@ -33,18 +39,20 @@
 | 7 | GraphQL（検索条件 mutation → 一覧 query） | キャンセル予約一覧 | `POST /CLS/hair/api/graphql/{operationName}/` |
 | 8 | `GET /CLP/bt/reserve/net/reserveDetail/?reserveId=…&rpsValue=7` | 予約詳細（HTML） | 店舗スコープ（誤店舗は `BPCL010V01`）。キャンセル料・電話・カナ氏名・規定はここでのみ取得 |
 
-### ヘアサロン抽出（REQ-1）
+### 店舗抽出（REQ-1）
 
-groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみから店舗を抽出する。
-**店舗名では判別不可**（実例: 店名「GO TODAY シェアサロン 札幌Alba店」がキレイサロン区分 `kireiStoreInfoArea` に在籍）。
-各行から サロンID（`H000…`）＋店舗名を取得（`parseHairSalons`）。ログイン成功（`userid` 非空）かつヘアサロン 1 件以上で連携成功。
+groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `id="kireiStoreInfoArea"` テーブル（キレイ区分）の**両方**から店舗を抽出する。
+**店舗名では判別せず区分テーブルで抽出する**（実例: 店名「GO TODAY シェアサロン 札幌Alba店」はキレイサロン区分 `kireiStoreInfoArea` に在籍するが、これも取り込み対象）。
+各行から サロンID（`H000…`）＋店舗名を取得（`parseSalons`）。ヘア→キレイの順に並べ、両区分にまたがる重複店舗IDは先勝ち（ヘア優先）で 1 件に畳む。ログイン成功（`userid` 非空）かつ店舗 1 件以上で連携成功。
+
+> **取り込み実行はヘア固定エンドポイント（要対応）**: 店舗一覧の抽出はヘア＋キレイ両対応だが、日次取り込みの店舗遷移（`enterStore` の forward）は `designKbn=B`（ヘア）固定で、予約一覧/詳細の API パスも `/CLS/hair/...` 固定（`salonboard-client.ts`）。キレイ店舗は別の区分値・別パスになる可能性が高く、キレイ店舗の予約取り込みを正式対応するには実アカウントでの区分値・API パス検証が必要（未検証。連携・表示までは可能だが取り込み実行は別 Issue）。
 
 ### 店舗単位連携の単一店舗自動取得（REQ-8・#23・2026-06-13 実証）
 
 店舗単位連携は **ログインの成否のみ**を確認し、単一店舗の店舗ID・店舗名を自動取得する（多店舗の一覧クロール・確認画面は使わない）。実アカウント2種で挙動を実証:
-- **会社アカウント**（`CD34512`）: groupTop に `biyouStoreInfoArea`（14店舗）。`parseHairSalons` が **2件以上** → 会社アカウントと判定しエラー（会社単位連携を促す・未保存）。
-- **単一店舗アカウント**（`CD77768`）: `POST /CNC/groupTop/` は **システムエラー画面**（`biyouStoreInfoArea` 無し、`parseHairSalons`=0）を返すが、hidden `<input name="STORE_ID" value="H…">` に唯一の店舗IDを埋め込む。続けて `POST /CLP/bt/top/`（`isViaLogin=true`・forward 不要）で店舗TOPが返り、`sc_data` の `"storeid":"H…"` ＋ パンくず（`class="path"` 内 `{店舗名}様 / {店舗ID} / …`）から店舗ID・店舗名を取得（`parseStoreTop`）。
-- 判定フロー: `parseHairSalons>=2`→会社エラー / `==1`→その1店舗を採用 / `==0`→店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存）。ログイン失敗もエラー・未保存。
+- **会社アカウント**（`CD34512`）: groupTop に `biyouStoreInfoArea`（14店舗）。`parseSalons`（ヘア＋キレイ）が **2件以上** → 会社アカウントと判定しエラー（会社単位連携を促す・未保存）。
+- **単一店舗アカウント**（`CD77768`）: `POST /CNC/groupTop/` は **システムエラー画面**（区分テーブル無し、`parseSalons`=0）を返すが、hidden `<input name="STORE_ID" value="H…">` に唯一の店舗IDを埋め込む。続けて `POST /CLP/bt/top/`（`isViaLogin=true`・forward 不要）で店舗TOPが返り、`sc_data` の `"storeid":"H…"` ＋ パンくず（`class="path"` 内 `{店舗名}様 / {店舗ID} / …`）から店舗ID・店舗名を取得（`parseStoreTop`）。
+- 判定フロー: `parseSalons>=2`→会社エラー / `==1`→その1店舗を採用 / `==0`→店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存）。ログイン失敗もエラー・未保存。
 - パーサ: `extractHiddenStoreId`（hidden STORE_ID）/ `parseStoreTop`（店舗TOP）。fixture: `group-top-single-store.html` / `store-top-single.html`（PII置換済み）。
 
 ### 一覧 GraphQL（REQ-2/3）と persisted query の自動復旧
@@ -80,8 +88,11 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 判定する。実測で確定した前提:
 - **AWS の IP レンジはネットワークレベルで遮断**（dev batch Lambda の egress `35.72.34.85` から
   `salonboard.com` は TimeoutError、`example.com` は到達可）。→ AWS 直 egress では不可。
-- 住宅/モバイル回線（JP）からは到達可。pure HTTP は `_abck`（JS 実行で生成）を作れず bot スコアが上がりやすく、
-  CAPTCHA（ドラッグ&ドロップ型）へ昇格すると突破不能。
+- 住宅/モバイル回線（JP）からは到達可。**pure HTTP は `_abck` を JS 実行で生成できない**が、実測（2026-06-18・
+  JP 住宅プロキシ）では `GET /login/` → `POST doLogin` → 保護 SPA（`/CLS/hair/reservations/init/`）まで **200 で
+  通常応答が返り Akamai のチャレンジに昇格しなかった**（doLogin は CAPTCHA ではなくアプリのログイン結果ページ）。
+  → 現状は **HTTP + proxy が軽量で有効**。ただし IP レピュテーション/velocity 次第で CAPTCHA（ドラッグ&ドロップ型）へ
+  昇格しうるため、突破不能化に備え `playwright` をフォールバックとして残す。
 
 **`playwright` トランスポートの対策（`SalonboardPlaywrightClient`）:**
 - **Decodo スティッキープロキシ（JP 固定）**: 単一ポート（既定 `gate.decodo.com:7000`）+ username パラメータ方式
@@ -91,13 +102,39 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 - **実ブラウザで JS 実行**して `_abck` を正規取得（PDCA: 実アカウントでログイン成功・`userid` 取得を確認済み）。
 - **一貫したフィンガープリント**: `locale=ja-JP` / `timezoneId=Asia/Tokyo` / 固定 UA + `sec-ch-ua` / viewport。
 - **stealth**: `navigator.webdriver` を除去（自動化検知回避）。
-- **アセット遮断**: 画像/フォント/メディアを `route.abort()`（JS/CSS は Akamai の JS 実行に必要なので通す）。
+- **アセット＋サードパーティホスト遮断**（`shouldAbortRequest`）: 画像/フォント/メディア（resourceType）に加え、
+  **`*.salonboard.com` 以外のホスト（GTM/karte/GA/広告/Sentry 等）も `route.abort()`**。Akamai の JS と `_next`
+  バンドルはファーストパーティ（`*.salonboard.com`。バンドルは `imgbp.salonboard.com`）なので残す。これで Decodo の
+  実測転送量の**約 7 割（GTM 単体 10.8MB 等）を削減**。JS/CSS のファーストパーティは Akamai の JS 実行に必要なので通す。
 - **人間的ペーシング**: 直列 + リクエスト間ジッタ。
 - **CAPTCHA 検知**: login / 各ページ応答から検知したら `SalonboardCaptchaError` を投げ、当該ランを失敗として
   理由記録し中断（無限ループ・無駄な velocity を回避）。将来の自動解決はフック差し替えで対応。
 
+**`http` トランスポートの proxy（`SalonboardHttpClient`）:** global fetch は env プロキシ（`HTTP_PROXY` 等）を
+参照しないため、**undici `ProxyAgent` を fetch の `dispatcher`** に渡して Decodo 経由で egress する
+（`Proxy-Authorization: Basic <base64(user:pass)>`＝`proxyAuthToken`、1 クライアント=1 スティッキー IP、
+proxy 未設定時は直結）。全リクエストに `AbortSignal.timeout`（既定 `HTTP_REQUEST_TIMEOUT`=30s）を付与し、
+超過/プロキシ失敗は `classifyHttpError` で `SalonboardTimeoutError`/`SalonboardProxyError` へ正規化する
+（理由分類＋下記リトライ可能化）。undici は `package.json` 依存（v6・Node20 互換）で、必要時のみ動的 import
+（直結時・proxy 未設定の local/test では読み込まない）。proxy 解決・fail-safe は playwright と共通
+（`resolveSalonboardProxy`/`requireSalonboardProxy`）。
+
 クライアントは `SALONBOARD_TRANSPORT` で選択（`createSalonboardClient({ runId })`）。テスト注入シーム
-`setSalonboardClientFactory` は維持。実プロキシでの実ログイン・実行頻度/CAPTCHA 頻度は人手確認（T-2/T-4/T-10/T-11）。
+`setSalonboardClientFactory` は維持。取り込み実行ごとに選択トランスポート構成を 1 行ログ出力する
+（`[salonboard-import] transport=… chromium=… proxy=…`＝`describeTransport`。proxy は host:port のみで認証情報は出さない）。
+実プロキシでの実ログイン・実行頻度/CAPTCHA 頻度は人手確認（T-2/T-4/T-10/T-11）。
+
+### ログインの一過性失敗リトライ（residential 出口 IP のばらつき対策）
+
+residential プロキシは**出口 IP の品質にばらつき**があり、遅い/タールピットされる IP を掴むと login の
+`page.goto`（playwright）/ fetch（http）が**タイムアウト**する（実測: 同一コードで login が 9.6s 成功／
+65.6s 激遅と IP 依存）。`loginWithRetry`（`salonboard-import.service.ts`）が **`timeout` / `proxy_error` のときだけ
+新しいスティッキーセッション（=新 runId=新 IP）で最大 3 回（`MAX_LOGIN_ATTEMPTS`）引き直す**。同じ IP で粘らず
+**IP を変えて引き直す**のが要点。各試行間にジッタを挟む（velocity 抑制）。会社単位・店舗単位の両ログイン経路に適用。
+**リトライしないもの**:
+- `CAPTCHA`（引き直しは velocity を上げ bot スコアを悪化させる。即失敗）
+- `login.ok=false`（認証情報誤り。引き直すとアカウントロックの恐れ。即失敗）
+- クライアント構築失敗（proxy 未設定等の恒久的な設定エラー。`loginWithRetry` の外へ伝播）
 
 **Chromium 実行環境（REQ-5・採用: Lambda + `@sparticuz/chromium`）**: `selectChromiumSource(env)` が優先順
 `CHROMIUM_EXECUTABLE_PATH` > `CHROMIUM_CHANNEL`（ローカルの system Chrome） > `AWS_LAMBDA_FUNCTION_NAME` あり
@@ -105,6 +142,10 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 で決める。`build.mjs` は `playwright-core` / `@sparticuz/chromium` を **external 化**（バンドル不可）、
 `deploy-batch.sh` が両者を `node_modules` 同梱し、batch Lambda を memory 2048MB / timeout 600s /
 ephemeral `/tmp` 1024MB へ引き上げ、`SALONBOARD_TRANSPORT` / `DECODO_*` を投入する。
+**HTTP + proxy 運用（`SALONBOARD_TRANSPORT=http`）の場合は Chromium 不要**（`@sparticuz/chromium` を展開せず
+メモリ/タイムアウトの引き上げも不要）で、`DECODO_*`（`DECODO_PROXY_HOST`/`DECODO_PROXY_PORT` + 認証）だけで動く。
+dev/prod は `.env.development`/`.env.production` に `DECODO_PROXY_HOST`/`DECODO_PROXY_PORT` を記載しないと
+`requireSalonboardProxy` が `proxy_error` で停止する。
 
 **ログイン成功判定（単一店舗アカウント対応）**: `userid` は doLogin 応答に載る。会社単位は遷移先 groupTop にも
 残るが、**単一店舗アカウントは login 後 `/CLP/bt/top/`（店舗トップ）へ遷移し最終 HTML に userid を持たない**。
@@ -245,9 +286,12 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 - unit: `cancellation-status` / `crypto-secret`（envelope ラウンドトリップ）/ `salonboard-parser`（fixture。#23 で
   `extractHiddenStoreId`/`parseStoreTop` の店舗単位パースを追加）/ `cancellation-fee`（料率算出・境界）/
   `import-window`（抽出窓・契約日境界）/ `mask-imported-pii`。**#22 追加**: `salonboard-playwright-client`
-  （login/CAPTCHA 検知/コンテキスト属性/アセット遮断）・`salonboard-proxy-config`（Decodo username/fail-safe）。
+  （login/CAPTCHA 検知/コンテキスト属性/**アセット＋サードパーティホスト遮断 `shouldAbortRequest`/`isSalonboardHost`**/
+  **`describeTransport`（トランスポート要約ログ）**/ **`proxyAuthToken`（HTTP proxy 認証ヘッダ）**）・
+  `salonboard-proxy-config`（Decodo username/fail-safe）。
 - e2e（`app.request()` + fake client 注入 + fixture）: 連携検証/保存（`salonboard-integration`）/
-  取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・**直列化（inflight=1）/ジッタ/失敗理由分類**（`salonboard-import`）/
+  取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・**直列化（inflight=1）/ジッタ/失敗理由分類/ログイン一過性失敗
+  リトライ（timeout は新IPで引き直し成功・連続timeoutは上限3回・CAPTCHA/認証誤りは即失敗）**（`salonboard-import`）/
   送信・手動取り込み・バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
   **#23 追加**: 店舗単位 verify/save・店舗CRUD・連携単位/lock・一覧の `applicationId` フィルター・実行記録の会社単位化・
   マルチソース独立・リネーム回帰（`external_shops`→`shops`）。

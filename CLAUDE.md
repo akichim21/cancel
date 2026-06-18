@@ -93,8 +93,9 @@ prod は従来どおり prod アカウント。infra は `cancel-billing-service
 各サブリポジトリの `deploy*.sh` を使う。**`prod` は確認プロンプトが出るため一度立ち止まる。**
 
 ```bash
-# API (Lambda)
-cd cancel-billing-service-api && ./deploy-api.sh dev   # / prod
+# API (Lambda + batch) — 統合デプロイ。migrate → API → batch を一括実行（実行漏れ防止）
+cd cancel-billing-service-api && ./deploy.sh dev       # / prod
+#   個別: ./deploy-api.sh dev（API のみ）/ ./deploy-batch.sh dev（batch のみ）。単独実行時は migrate:<env> を自分で流す
 
 # サロンポータル
 cd cancel-billing-service && ./deploy.sh dev           # / prod

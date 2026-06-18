@@ -1,0 +1,30 @@
+{
+  "issueNumber": 22,
+  "branchName": "GTSS-817-proxy",
+  "baseBranchOverride": "GTSS-817-store",
+  "worktreeDir": "GTSS-817-proxy",
+  "slot": 9,
+  "ports": {
+    "api": 1347,
+    "admin": 3009,
+    "userPortal": 5182,
+    "lp": 5282
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-817-proxy",
+      "branch": "GTSS-817-proxy",
+      "baseBranch": "GTSS-817-store"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}
