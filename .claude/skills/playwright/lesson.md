@@ -255,3 +255,38 @@
 ### 巨大 spec ファイル（1000 行超）は機能別に分割する
 - **問題**: 1 つの spec に複数機能（一覧 / 詳細 / 編集 / 検索 / フィルター 等）を詰め込みがち。CI 並列度低下 + メンテ性悪化
 - **正しい対応**: ファイル単位 parallel default なので、機能別 spec に分割する
+
+## Playwright 自動化（ブラウザ駆動クライアント）実装パターン
+
+> 上記は E2E テスト作成のパターン。以下は Playwright をスクレイピング/自動化クライアント
+> （例: `SalonboardPlaywrightClient`）として使う実装で学んだパターン。
+
+### 成功判定を「最終ページ」で読むとアカウント種別差で false-negative になる（必須）
+- **問題**: ログイン等の成功シグナル（例: `userid : '...'`）を **遷移後の最終ページ HTML** から読むと、アカウント種別で着地ページが異なる場合に取りこぼす。実例（GTSS-817 #22）: pure HTTP 実装は doLogin 応答から `userid` を直接読んでいたが、Playwright 移植時に「クリック→遷移後の `page.content()`」から読むようにしたところ、**会社アカウントは login 後 `/CNC/groupTop/`（userid あり）だが、単一店舗アカウントは `/CLP/bt/top/`（店舗トップ・userid なし）へ遷移**するため、ログイン成功なのに `ok:false`（false-negative）になった。実機 T-11 で初めて顕在化（unit fake では会社アカウントの着地ページしか模していなかった）。
+- **正しい対応**: 成功シグナルが載る **中間レスポンス（doLogin 等）を `page.on('response')` で捕捉**して判定する。最終ページにも残る場合があるのでフォールバックとして併用する。
+  ```ts
+  let body = '';
+  page.on('response', async (resp) => {
+    try {
+      if (String(resp.url()).includes('/CNC/login/doLogin/')) {
+        const t = await resp.text();
+        if (t) body = t; // 途中 redirect 等で複数発火しても最終本文を採用
+      }
+    } catch { /* 個別応答の本文取得失敗は無視 */ }
+  });
+  await page.click('a.loginBtnSize');
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForTimeout(1200); // response handler(async text) の settle 待ち
+  const finalHtml = await page.content();
+  const userId = parseUserId(body) || parseUserId(finalHtml); // 中間応答 → 最終ページの順
+  ```
+- **補足**: `page.waitForResponse(predicate)` は「最初にマッチした応答」を返すため、途中 redirect で複数発火するフローでは目的の本文を取り逃すことがある（実際に最初これで詰まった）。`page.on('response')` で最後にマッチした本文を保持する方が確実。
+- **テストの教訓**: pure 関数（成功判定）は単体テストできても、**「どのページから読むか」はアカウント種別ごとに着地が変わる**ため fake だけでは漏れる。fake には「成功シグナルが中間応答のみにあり最終ページには無い」ケース（単一店舗）も必ず含める（回帰テスト T-1b）。
+
+### 実ブラウザ自動化は「実機 1 本」を必ず通す（pure 関数の単体テストだけでは足りない）
+- **問題**: ブラウザ駆動クライアントはセレクタ・遷移・Akamai 等の bot 保護・アカウント種別差など、fake では再現しきれない要素が多い。pure ヘルパー（パース・判定）の単体テストが green でも、実機で初めて壊れる（上記 login false-negative も実機 T-11 で発覚）。
+- **正しい対応**: CI では fake + fixture で論理を担保しつつ、**実アカウント・実プロキシでの「login → 一覧 → 詳細」最低 1 本を人手 PDCA で必ず通す**。外部・bot 保護下で CI 不可なら人手確認を受け入れ条件に明示する。
+
+### 取得結果は「生 HTML/JSON」で返し、パースは純粋関数へ分離する
+- **問題**: ブラウザ内で DOM 抽出までやると transport と parse が密結合になり、fixture 単体テストが書けず HTTP 実装との挙動差も出る。
+- **正しい対応**: クライアントは `page.content()` / ページ内 `fetch` の **生レスポンスをそのまま返し**、解析は純粋関数（`parseReservationList` 等）へ委譲する。これで HTTP/Playwright どちらの transport でも同一パーサ・同一 fixture テストを共有でき、実機で採取した HTML をそのまま fixture 化できる（PII は置換）。
