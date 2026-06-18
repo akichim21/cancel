@@ -99,6 +99,22 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 クライアントは `SALONBOARD_TRANSPORT` で選択（`createSalonboardClient({ runId })`）。テスト注入シーム
 `setSalonboardClientFactory` は維持。実プロキシでの実ログイン・実行頻度/CAPTCHA 頻度は人手確認（T-2/T-4/T-10/T-11）。
 
+**Chromium 実行環境（REQ-5・採用: Lambda + `@sparticuz/chromium`）**: `selectChromiumSource(env)` が優先順
+`CHROMIUM_EXECUTABLE_PATH` > `CHROMIUM_CHANNEL`（ローカルの system Chrome） > `AWS_LAMBDA_FUNCTION_NAME` あり
+（= `@sparticuz/chromium` が brotli 圧縮 Chromium を `/tmp` へ展開し executablePath を返す） > playwright 同梱
+で決める。`build.mjs` は `playwright-core` / `@sparticuz/chromium` を **external 化**（バンドル不可）、
+`deploy-batch.sh` が両者を `node_modules` 同梱し、batch Lambda を memory 2048MB / timeout 600s /
+ephemeral `/tmp` 1024MB へ引き上げ、`SALONBOARD_TRANSPORT` / `DECODO_*` を投入する。
+
+**ログイン成功判定（単一店舗アカウント対応）**: `userid` は doLogin 応答に載る。会社単位は遷移先 groupTop にも
+残るが、**単一店舗アカウントは login 後 `/CLP/bt/top/`（店舗トップ）へ遷移し最終 HTML に userid を持たない**。
+そのため Playwright 実装は `page.on('response')` で doLogin 応答本文を捕捉して userid を判定する（遷移先 HTML へ
+フォールバック）。実機 T-11 でこの false-negative を検出・修正。
+
+**T-11 実機確認（end-to-end）**: 単一店舗アカウントで Decodo JP プロキシ + 実 Chromium 経由に login →
+enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約詳細パース（支払い種別/規定/氏名/連絡先すべて取得）まで
+成功を確認済み。AWS 直 egress は Akamai 遮断のため不可（実測）で、プロキシ経由前提の設計どおり到達できる。
+
 ## 取り込みロジック（REQ-2/3）
 
 1. 連携済み店舗（`external_shops.linked=true`）を会社（`applicationId`）ごとにグルーピング（1 会社 1 ログイン）。
