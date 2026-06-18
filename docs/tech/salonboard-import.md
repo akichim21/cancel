@@ -1,7 +1,18 @@
 # サロンボード取り込み（技術）
 
 サロンボード（ホットペッパービューティーの管理画面 `salonboard.com`）からキャンセル予約を取り込む
-クローリング連携の技術仕様（GTSS-817）。pure HTTP + 軽量 HTML/JSON パースで実装し、headless ブラウザは使わない。
+クローリング連携の技術仕様（GTSS-817）。
+
+**通信トランスポートは 2 系統あり `SALONBOARD_TRANSPORT` で切り替える（#22）:**
+- `http`（既定）: pure HTTP + cookie セッション + 軽量 HTML/JSON パース（headless ブラウザ不使用）。
+- `playwright`: 実ブラウザ（Chromium）で Akamai の JS を実行して `_abck` を正規取得し、**Decodo 住宅/モバイル
+  スティッキープロキシ（JP 固定）経由**で通信する。**AWS Lambda の egress IP は Akamai にネットワークレベルで
+  遮断される（実測: `salonboard.com` へ TimeoutError）ため、dev/prod の実運用では playwright + プロキシが前提**。
+  ただし Chromium 実行環境（Lambda + `@sparticuz/chromium` 等）の配線は後続のため、既定は `http` のまま。
+
+どちらのトランスポートでも `SalonboardClient` interface（login / enterStore / 一覧 / 詳細）と取り込みロジック
+（抽出窓・料率算出・冪等・PII マスク・理由ログ）は共通。レスポンスは生 HTML/JSON で返し、解析は
+`utils/salonboard-parser`（純粋関数）へ委譲する（transport と parse の分離）。
 
 中核は `cancel-billing-service-api/src/services/salonboard-import.service.ts`（共有）に置き、
 日次バッチ（`src/batch.ts` の `action='salonboard-import'`）と手動取り込み HTTP（`POST /cancellations/import`）の
@@ -59,13 +70,34 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
 氏名(カナ) / 氏名(漢字) / 電話番号 / 合計金額。ヘッダ領域に `受信日時：YYYY/MM/DD HH:MM`。
 **「キャンセル料」欄は CANCEL でも「キャンセル料なし」/「-」が入り信頼できない**ため判定・金額算出に使わない。
 
-詳細リクエストは N+1（1 予約 = 一覧1 + 詳細1）。Akamai 警戒のため **3〜5 並列に制限**（`pMapLimit`、`DETAIL_CONCURRENCY=4`）。
+詳細リクエストは N+1（1 予約 = 一覧1 + 詳細1）。**bot スコア抑制のため詳細取得は直列（同時 inflight=1）**
+で 1 件ずつ順次処理し、各取得の間にランダム遅延（ジッタ）を挟む（#22 / REQ-3。旧 `pMapLimit` /
+`DETAIL_CONCURRENCY=4` の並列は廃止）。ジッタ範囲は `SALONBOARD_IMPORT_JITTER_MS_*`（既定 800〜2500ms）。
 
-### Akamai Bot Manager
+### Akamai Bot Manager / Decodo プロキシ（#22）
 
-`_abck`/`bm_sz` 保護下だが、UA・Sec-Fetch 系ヘッダを揃えれば pure HTTP で全通過（実証）。JS チャレンジが
-昇格した場合のフォールバックとして `sparticuz/chromium`+playwright を想定し、クライアントを interface 化
-（`SalonboardClient` / `setSalonboardClientFactory`）してある（本 Issue では HTTP loader のみ実装）。
+`salonboard.com` は **Akamai Bot Manager**（`_abck`/`bm_sz`）で保護され、IP レピュテーション + bot スコアで
+判定する。実測で確定した前提:
+- **AWS の IP レンジはネットワークレベルで遮断**（dev batch Lambda の egress `35.72.34.85` から
+  `salonboard.com` は TimeoutError、`example.com` は到達可）。→ AWS 直 egress では不可。
+- 住宅/モバイル回線（JP）からは到達可。pure HTTP は `_abck`（JS 実行で生成）を作れず bot スコアが上がりやすく、
+  CAPTCHA（ドラッグ&ドロップ型）へ昇格すると突破不能。
+
+**`playwright` トランスポートの対策（`SalonboardPlaywrightClient`）:**
+- **Decodo スティッキープロキシ（JP 固定）**: 単一ポート（既定 `gate.decodo.com:7000`）+ username パラメータ方式
+  `user-<user>-country-jp-session-<runId>-sessionduration-<min>`。**1 ラン=1 セッション=1 IP**、ラン間で session
+  （=runId）を更新して別 IP にする。`resolveSalonboardProxy({runId})` が構築（未設定時 fail-safe: local 直結 /
+  dev・prod は throw）。ポート方式 30001-30010 は国がランダムで JP 固定できないため不採用。
+- **実ブラウザで JS 実行**して `_abck` を正規取得（PDCA: 実アカウントでログイン成功・`userid` 取得を確認済み）。
+- **一貫したフィンガープリント**: `locale=ja-JP` / `timezoneId=Asia/Tokyo` / 固定 UA + `sec-ch-ua` / viewport。
+- **stealth**: `navigator.webdriver` を除去（自動化検知回避）。
+- **アセット遮断**: 画像/フォント/メディアを `route.abort()`（JS/CSS は Akamai の JS 実行に必要なので通す）。
+- **人間的ペーシング**: 直列 + リクエスト間ジッタ。
+- **CAPTCHA 検知**: login / 各ページ応答から検知したら `SalonboardCaptchaError` を投げ、当該ランを失敗として
+  理由記録し中断（無限ループ・無駄な velocity を回避）。将来の自動解決はフック差し替えで対応。
+
+クライアントは `SALONBOARD_TRANSPORT` で選択（`createSalonboardClient({ runId })`）。テスト注入シーム
+`setSalonboardClientFactory` は維持。実プロキシでの実ログイン・実行頻度/CAPTCHA 頻度は人手確認（T-2/T-4/T-10/T-11）。
 
 ## 取り込みロジック（REQ-2/3）
 
@@ -76,13 +108,17 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）のみ
    - **早期スキップ（N+1 回避）**: 作成済み（`cancellations` の `externalReservationId`）or 確定理由ログ済み
      （`external_import_logs` の terminal reason）の予約は**詳細取得前にスキップ**。
    - 現地払い以外（list の `paymentType`）は詳細を取らず確定スキップ＋ログ（`not_local_payment`）。
-4. 詳細取得（3〜5 並列）→ フィルタ → 作成 or スキップ:
+4. 詳細取得（**直列・各取得の間にジッタ**。#22 / REQ-3）→ フィルタ → 作成 or スキップ:
    - 詳細取得失敗 → `detail_fetch_failed`（**一過性・翌日リトライ**＝terminal でない）。
    - 現地払い以外（詳細で再確認）→ `not_local_payment`。
    - 予約時キャンセル規定なし（`-`）→ `no_policy`。
    - 元データのメール・電話が両方無し → `no_contact`。
    - 料率解釈不能 → `rate_unparseable`。
    - それ以外 → **非 prod PII マスク**して `pre_send`（送信前）で `cancellations` を作成。
+   - ブラウザ/プロキシ起因の失敗（#22 / REQ-7）は理由分類して記録（いずれも一過性=非 terminal・翌日リトライ）:
+     `captcha_detected`（CAPTCHA 昇格）/ `proxy_error`（プロキシ接続失敗）/ `timeout`（通信タイムアウト）/
+     `login_failed`（`userid` 取得できず）。login・店舗遷移（enterStore/一覧取得）・詳細取得のいずれの経路でも
+     `classifyFailure` で分類し、会社別実行結果の `shops[].reasonCode` / `byReason` と取り込みログ `reason` に残す。
 5. 結果（対象店舗数・店舗別 作成/対象外スキップ/失敗 件数）を集計して返す。あわせて実行単位の結果を
    `external_import_runs` に必ず記録する（`triggerType`・店舗別内訳・失敗 error を含む）。店舗ループ以前の
    致命的失敗（店舗一覧取得失敗等）も握り潰さず `ok:false` で記録する（記録自体の失敗は取り込みを壊さない）。
@@ -192,10 +228,11 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 
 - unit: `cancellation-status` / `crypto-secret`（envelope ラウンドトリップ）/ `salonboard-parser`（fixture。#23 で
   `extractHiddenStoreId`/`parseStoreTop` の店舗単位パースを追加）/ `cancellation-fee`（料率算出・境界）/
-  `import-window`（抽出窓・契約日境界）/ `mask-imported-pii`。
+  `import-window`（抽出窓・契約日境界）/ `mask-imported-pii`。**#22 追加**: `salonboard-playwright-client`
+  （login/CAPTCHA 検知/コンテキスト属性/アセット遮断）・`salonboard-proxy-config`（Decodo username/fail-safe）。
 - e2e（`app.request()` + fake client 注入 + fixture）: 連携検証/保存（`salonboard-integration`）/
-  取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・並列上限（`salonboard-import`）/ 送信・手動取り込み・
-  バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
+  取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・**直列化（inflight=1）/ジッタ/失敗理由分類**（`salonboard-import`）/
+  送信・手動取り込み・バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
   **#23 追加**: 店舗単位 verify/save・店舗CRUD・連携単位/lock・一覧の `applicationId` フィルター・実行記録の会社単位化・
   マルチソース独立・リネーム回帰（`external_shops`→`shops`）。
 - fixture（`src/__tests__/fixtures/salonboard/`）は実 HTTP 採取レスポンスを**PII マスクして**作成（生 PII は非コミット）。
