@@ -55,17 +55,23 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 |---|---|---|
 | forward 区分値 | `designKbn=B` | **`designKbn=K`** |
 | 店舗トップ | `POST /CLP/bt/top/` | **`GET /KLP/top/`** |
-| 予約一覧 | GraphQL（`/CLS/hair/api/graphql/…`、persisted query、JSON） | **`POST /KLP/reserve/reserveList/`**（HTML テーブル） |
+| 予約一覧（検索実行） | GraphQL（`/CLS/hair/api/graphql/…`、persisted query、JSON） | **`POST /KLP/reserve/reserveList/search`**（action+method。HTML テーブル） |
 | 一覧絞り込み | GraphQL variables（`cancelStatus`） | フォーム POST `reserveDispStatusCdArray` ＋ Struts `org.apache.struts.taglib.html.TOKEN`（CSRF）＋ `storeIdForMultipleTabCheck`/`watchword`/`KMAGIC` |
 | 期間指定 | `startDate`/`endDate` | `rsvDateFrom`/`rsvDateTo`（**`YYYYMMDD`**） |
 | キャンセル状態コード | `['CANCEL','UNAUTHORIZED_CANCEL']` | **`reserveDispStatusCdArray`: `7`=お客様キャンセル / `9`=無断キャンセル**（他: 6=お断り/8=サロンキャンセル/10=自動キャンセルは対象外） |
 | 予約詳細 | `GET /CLP/bt/reserve/net/reserveDetail/?reserveId=…&rpsValue=7` | **`GET /KLP/reserve/net/reserveDetail/?reserveId=…`** |
 
 - **遷移**: 会社単位は `POST /CNC/groupTop/forward`（`STORE_ID&designKbn=K`）→ `GET /KLP/top/`（`enterKireiStore`）。店舗単位はログイン直後に `/KLP/top/` へ着地済み（`enterSingleKireiStore`）。
-- **CSRF（Struts double-submit）**: フォーム再描画ごとに TOKEN が更新されるため、**`GET /KLP/reserve/reserveList/` でフォーム取得 → 同一セッションで POST**。hidden フィールドは `extractKireiListFormFields` で丸ごと引き継ぎ、`buildKireiListBody` が期間＋状態(7,9)を上書き/付与する。
-- **パース**: `parseKireiReservationList`（結果テーブルを列見出し駆動でマッピング。予約番号は `reserveId=` リンクから）/ `parseKireiReservationDetail`（ヘアと同じ `th/td` 抽出＋別名フォールバック）。
-- **支払い種別**: 一覧の支払いラベルは詳細（権威）に委ね、`parseKireiReservationList` は `paymentType=null`（未確定ラベルでの誤スキップ回避）。`isLocalPayment` は `現地決済` も許容。
-- **実機制約**: 利用可能なキレイ店舗が予約 0 件のため、**一覧の実行・店舗種別判定・店舗単位 verify はライブ検証済み**だが、**実際のキャンセル予約行・詳細 HTML はライブ採取できず構造推定 fixture**で実装。実データでの一覧行/詳細パースの最終確認は実アカウント（キャンセル実績あり）で別途行う。
+- **検索の実行先（重要）**: 検索ボタン `#search` は `$.shuhari.formSubmit("reserveList","search")` でフォーム action に `search` を付与し **`POST /KLP/reserve/reserveList/search`** へ送る。**base パス `/KLP/reserve/reserveList/` への POST は検索を実行せず初期フォーム（0 件）を返す**ため、必ず `/search` を付ける（本対応前は実運用で常に 0 件になっていた・実機確認済み）。
+- **CSRF（Struts double-submit）**: フォーム再描画ごとに TOKEN が更新されるため、**`GET /KLP/reserve/reserveList/` でフォーム取得 → 同一セッションで `POST …/search`**。hidden は `extractKireiListFormFields` で丸ごと引き継ぎ、`buildKireiListBody` が期間＋状態(7,9)を上書き/付与する。
+- **一覧の行構造（実機 HTML 準拠）**: `parseKireiReservationList` は結果テーブル（`reserveId=` リンクを含む `<table>`）を列見出し駆動でマッピング。実機の特徴に対応 —
+  - 列見出しは `<br>` 由来の空白を含む（「来店 日時」「ステー タス」「お支払金額 （pt利用前）」）→ 空白除去して語マッチ。
+  - **来店日時は `MM/DD`（年なし）** → 取得期間（`rsvDateFrom/To`）から年を補完（`resolveKireiVisitDate`。一覧はサーバ側で期間フィルタ済みのため一意に決まる）。
+  - お客様名セルは 氏名 `<p>` ＋「(予約番号)」リンク → 予約番号は詳細リンクから取り、氏名から括弧表記を除去。
+  - お支払金額は「`X 円(X)`」の二段表記 → 先頭の数値のみ採用。**キャンセル日時列は無い**（`updatedAt=null`、契約日判定は来店日でフォールバック）。
+  - 一覧に支払い種別の確定ラベルは無いため `paymentType=null`（詳細が権威）。`isLocalPayment` は `現地決済` も許容。
+- **詳細（実機 HTML で確認済み）**: `parseKireiReservationDetail` はヘアと同じ `<th>ラベル</th><td>値</td>`。予約番号/ステータス/支払い種別/**予約時キャンセル規定**/氏名(カナ)/氏名(漢字)/電話番号/合計金額/来店日時/受信日時 はヘアと同名ラベルで抽出成功。**HPB 経由予約はメールアドレス列が無い**（email は null、連絡は電話）。カナセルの「統合候補のお客様情報を確認する」等のリンク文言は `cleanName` で除去。
+- **実機検証状況**: ログイン/着地/種別判定/店舗単位 verify、`POST …/search` の検索実行、一覧行パース（実 2 行）、詳細パース（実 1 件・規定あり）まで**実データでライブ検証済み**。ただし対象店舗に **お客様/無断キャンセル（状態 7,9）の予約が 0 件**のため、状態 7,9 で絞った実一覧行・キャンセル詳細（キャンセル処理日等）の確認のみキャンセル実績のある店舗で別途必要。
 - **トランスポート**: HTTP/Playwright 両実装あり。dev/prod は Playwright + Decodo プロキシ（Akamai 回避）。
 
 ### 店舗単位連携の単一店舗自動取得（REQ-8・#23・2026-06-13 実証）
