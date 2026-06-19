@@ -290,3 +290,11 @@
 ### 取得結果は「生 HTML/JSON」で返し、パースは純粋関数へ分離する
 - **問題**: ブラウザ内で DOM 抽出までやると transport と parse が密結合になり、fixture 単体テストが書けず HTTP 実装との挙動差も出る。
 - **正しい対応**: クライアントは `page.content()` / ページ内 `fetch` の **生レスポンスをそのまま返し**、解析は純粋関数（`parseReservationList` 等）へ委譲する。これで HTTP/Playwright どちらの transport でも同一パーサ・同一 fixture テストを共有でき、実機で採取した HTML をそのまま fixture 化できる（PII は置換）。
+
+### フォーム検索が「サイレント0件」なら submit 先 URL（action+method）を疑う（必須）
+- **問題**: Struts/jQuery 等のフレームワークでは、検索ボタンの click handler が **form の action にメソッド名を付与して** submit することがある。例: SalonBoard キレイは `$.shuhari.formSubmit("reserveList","search")`（`formSubmit = (id, method) => { $form.attr('action', action + method); $form.submit(); }`）で、action `/KLP/reserve/reserveList/` ＋ `search` → 実際は **`POST /KLP/reserve/reserveList/search`** へ送られる。form の action 属性（base パス）にそのまま `fetch`/`form.submit()` で POST すると、**サーバは検索を実行せず初期フォーム（0件）を返す**。例外も 4xx も出ず「正常に0件」に見えるため、フィルタ条件や日付範囲のせいだと誤診しやすい（実際この案件で「広い期間・状態無指定でも0件」を当初フィルタの問題と取り違えた）。
+- **正しい対応**:
+  - `form.submit()` / action への raw POST を鵜呑みにせず、**検索ボタンの実 handler（バンドル JS の click handler）を読んで** 実際の submit 先 URL・追加パラメータ・hidden flag を確認する。`href="javascript:void(0)"` のボタンは必ず JS handler 経由。
+  - **「広い条件でも0件」なら submit が効いていない可能性をまず疑う**（フィルタではなく送信先）。初期フォーム GET と検索 POST のレスポンスを比較（サイズ／結果テーブルの有無）して、検索が実行されたか確認する。
+  - 修正は HTTP / Playwright **両トランスポートに同じ submit 先**を反映する（片方だけ直すと取り違える）。
+- **教訓（実構造は実データで確定する）**: 実機で「行が出る条件」をユーザー/実機で1本通してから、一覧行・詳細のパース構造を確定する。**推定構造は実構造とズレる**: 今回は (1) 列見出しの `<br>` 由来の空白（「ステー タス」でラベル不一致）、(2) 来店日時が `MM/DD`（年なし→取得期間から補完が必要）、(3) 氏名セルに「(予約番号)」混入、(4) 金額の二段表記（先頭値のみ採用）が、いずれも実 HTML で初めて判明した。0件店舗の推定 fixture だけでテストを green にすると、実データで壊れる。
