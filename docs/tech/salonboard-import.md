@@ -33,7 +33,7 @@
 | 1 | `GET /login/` | cookie 種付け | ログインフォーム取得 |
 | 2 | `POST /CNC/login/doLogin/` | ログイン | `userId`/`password`/`idCheckFlg=`。成功時レスポンス HTML の sc_data に `userid:'…'`（非空=成功） |
 | 3 | `POST /CNC/groupTop/` | 会社トップ（店舗一覧） | 空 body・`Content-Length:0`。`id="biyouStoreInfoArea"`=ヘア / `id="kireiStoreInfoArea"`=キレイ |
-| 4 | `POST /CNC/groupTop/forward` | 店舗コンテキストへ遷移 | `STORE_ID=H000…&designKbn=B`（**`B`=hair 必須**。`C` は不可） |
+| 4 | `POST /CNC/groupTop/forward` | 店舗コンテキストへ遷移 | `STORE_ID=H000…&designKbn=B`（**`B`=hair**）。**キレイは `designKbn=K` → `GET /KLP/top/`**（GTSS-817-kirei #25） |
 | 5 | `POST /CLP/bt/top/` | 店舗トップ | `isViaLogin=true` |
 | 6 | `GET /CLS/hair/reservations/init/` | SPA 初期化 | サーバ側 cached search を持つ。`?page=N` でページ位置を進める |
 | 7 | GraphQL（検索条件 mutation → 一覧 query） | キャンセル予約一覧 | `POST /CLS/hair/api/graphql/{operationName}/` |
@@ -45,7 +45,28 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 **店舗名では判別せず区分テーブルで抽出する**（実例: 店名「GO TODAY シェアサロン 札幌Alba店」はキレイサロン区分 `kireiStoreInfoArea` に在籍するが、これも取り込み対象）。
 各行から サロンID（`H000…`）＋店舗名を取得（`parseSalons`）。ヘア→キレイの順に並べ、両区分にまたがる重複店舗IDは先勝ち（ヘア優先）で 1 件に畳む。ログイン成功（`userid` 非空）かつ店舗 1 件以上で連携成功。
 
-> **取り込み実行はヘア固定エンドポイント（要対応）**: 店舗一覧の抽出はヘア＋キレイ両対応だが、日次取り込みの店舗遷移（`enterStore` の forward）は `designKbn=B`（ヘア）固定で、予約一覧/詳細の API パスも `/CLS/hair/...` 固定（`salonboard-client.ts`）。キレイ店舗は別の区分値・別パスになる可能性が高く、キレイ店舗の予約取り込みを正式対応するには実アカウントでの区分値・API パス検証が必要（未検証。連携・表示までは可能だが取り込み実行は別 Issue）。
+> **取り込み実行のキレイ対応（GTSS-817-kirei #25 で解決）**: 店舗一覧の抽出に加え、**日次/手動の取り込み実行もヘア＋キレイ両対応**。`shops.salon_type`（`'hair'`/`'kirei'`、NOT NULL default `'hair'`）で店舗種別を保持し、`importShop` が種別で遷移・一覧・詳細の取得経路を出し分ける（`clientOpsFor`）。請求・料率・スキップ理由分類のパイプラインはヘアと共通。ヘア既存経路は不変。
+
+#### キレイ（KLP）経路（GTSS-817-kirei #25・2026-06-19 実機検証）
+
+ヘアは React/Next.js + GraphQL（JSON）だが、**キレイは Struts/jQuery のサーバレンダリング HTML**で別系統。実機（店舗単位キレイアカウント）で確定した差分:
+
+| | ヘア | キレイ |
+|---|---|---|
+| forward 区分値 | `designKbn=B` | **`designKbn=K`** |
+| 店舗トップ | `POST /CLP/bt/top/` | **`GET /KLP/top/`** |
+| 予約一覧 | GraphQL（`/CLS/hair/api/graphql/…`、persisted query、JSON） | **`POST /KLP/reserve/reserveList/`**（HTML テーブル） |
+| 一覧絞り込み | GraphQL variables（`cancelStatus`） | フォーム POST `reserveDispStatusCdArray` ＋ Struts `org.apache.struts.taglib.html.TOKEN`（CSRF）＋ `storeIdForMultipleTabCheck`/`watchword`/`KMAGIC` |
+| 期間指定 | `startDate`/`endDate` | `rsvDateFrom`/`rsvDateTo`（**`YYYYMMDD`**） |
+| キャンセル状態コード | `['CANCEL','UNAUTHORIZED_CANCEL']` | **`reserveDispStatusCdArray`: `7`=お客様キャンセル / `9`=無断キャンセル**（他: 6=お断り/8=サロンキャンセル/10=自動キャンセルは対象外） |
+| 予約詳細 | `GET /CLP/bt/reserve/net/reserveDetail/?reserveId=…&rpsValue=7` | **`GET /KLP/reserve/net/reserveDetail/?reserveId=…`** |
+
+- **遷移**: 会社単位は `POST /CNC/groupTop/forward`（`STORE_ID&designKbn=K`）→ `GET /KLP/top/`（`enterKireiStore`）。店舗単位はログイン直後に `/KLP/top/` へ着地済み（`enterSingleKireiStore`）。
+- **CSRF（Struts double-submit）**: フォーム再描画ごとに TOKEN が更新されるため、**`GET /KLP/reserve/reserveList/` でフォーム取得 → 同一セッションで POST**。hidden フィールドは `extractKireiListFormFields` で丸ごと引き継ぎ、`buildKireiListBody` が期間＋状態(7,9)を上書き/付与する。
+- **パース**: `parseKireiReservationList`（結果テーブルを列見出し駆動でマッピング。予約番号は `reserveId=` リンクから）/ `parseKireiReservationDetail`（ヘアと同じ `th/td` 抽出＋別名フォールバック）。
+- **支払い種別**: 一覧の支払いラベルは詳細（権威）に委ね、`parseKireiReservationList` は `paymentType=null`（未確定ラベルでの誤スキップ回避）。`isLocalPayment` は `現地決済` も許容。
+- **実機制約**: 利用可能なキレイ店舗が予約 0 件のため、**一覧の実行・店舗種別判定・店舗単位 verify はライブ検証済み**だが、**実際のキャンセル予約行・詳細 HTML はライブ採取できず構造推定 fixture**で実装。実データでの一覧行/詳細パースの最終確認は実アカウント（キャンセル実績あり）で別途行う。
+- **トランスポート**: HTTP/Playwright 両実装あり。dev/prod は Playwright + Decodo プロキシ（Akamai 回避）。
 
 ### 店舗単位連携の単一店舗自動取得（REQ-8・#23・2026-06-13 実証）
 
@@ -54,6 +75,18 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 - **単一店舗アカウント**（`CD77768`）: `POST /CNC/groupTop/` は **システムエラー画面**（区分テーブル無し、`parseSalons`=0）を返すが、hidden `<input name="STORE_ID" value="H…">` に唯一の店舗IDを埋め込む。続けて `POST /CLP/bt/top/`（`isViaLogin=true`・forward 不要）で店舗TOPが返り、`sc_data` の `"storeid":"H…"` ＋ パンくず（`class="path"` 内 `{店舗名}様 / {店舗ID} / …`）から店舗ID・店舗名を取得（`parseStoreTop`）。
 - 判定フロー: `parseSalons>=2`→会社エラー / `==1`→その1店舗を採用 / `==0`→店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存）。ログイン失敗もエラー・未保存。
 - パーサ: `extractHiddenStoreId`（hidden STORE_ID）/ `parseStoreTop`（店舗TOP）。fixture: `group-top-single-store.html` / `store-top-single.html`（PII置換済み）。
+
+#### 店舗種別の自動判定（GTSS-817-kirei #25・REQ-6・2026-06-18/19 実機検証）
+
+店舗単位アカウントは区分テーブルを持たないため、`detectSalonType` が次のシグナルを優先順で評価して種別を判定する（実2アカウントで3シグナル相互一致）:
+1. **着地URL名前空間**（最強）: ヘア=`/CLP/bt/top/` / キレイ=`/KLP/top/`（Playwright は `login()` が `landingUrl` を返す）。
+2. **storeBaseInfo リンクの designKbn**: `?designKbn=B`→hair / `?designKbn=K`→kirei。
+3. **区分マーカー**: `header_ico_bt`（`alt="ヘアサロン"`）→hair / `header_ico_kr`（`alt="キレイサロン"`）→kirei。
+4. ナビ名前空間（補助）: `/CLP/` のみ→hair / `/KLP/` のみ→kirei。
+- **いずれも取れない場合は `null`＝判定不能でエラー（保存しない）**。誤種別で取り込みを壊さないフェイルセーフ（REQ-6/AC-5）。
+- 0件（単一店舗）の店舗TOP取得は種別に応じて出し分ける（ヘア=`fetchStoreTopHtml`(/CLP/bt/top/) / キレイ=`fetchKireiStoreTopHtml`(/KLP/top/)）。Playwright はログイン着地HTMLが店舗TOPなのでまず着地HTMLを `parseStoreTop` し、取れなければ再取得する。
+- 会社単位は groupTop の区分テーブル（`biyouStoreInfoArea`=hair / `kireiStoreInfoArea`=kirei）で種別が決まり、`parseSalons` が各店舗に `salonType` を付与する。
+- 注: `/CNC/mgr/storeBaseInfo/` は `?designKbn=` 無しの直接 GET だとシステムエラーになる（店舗トップのリンクが `?designKbn=B|K` を保持）。
 
 ### 一覧 GraphQL（REQ-2/3）と persisted query の自動復旧
 
