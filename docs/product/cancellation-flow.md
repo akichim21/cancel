@@ -33,6 +33,10 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 | `canceled` | キャンセル済 | 取消 |
 | `failed` | 失敗 | 決済失敗 |
 
+> **支払済（`paid`）は Stripe webhook（実決済）でのみ到達**し、`paidAt`（支払日）が設定される。管理画面の手動ステータス
+> 更新で扱えるのは `pending`（請求中）/ `failed`（失敗）/ `canceled`（キャンセル済）のみで、**手動「支払済」遷移は廃止**
+> （GTSS-836 / #30）。手動で支払済にすると `paidAt` 不在のまま精算用CSV・支払日フィルタから漏れるため。
+
 ## ステップ詳細
 
 ### 1. キャンセル請求の作成
@@ -48,6 +52,8 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
   - 旧形式（`shopName` フリーテキストのみ）のリクエストは **400 で拒否**（即時撤去・後方互換なし）。
 - 取り込み: `cancel-billing-service-api/src/services/salonboard-import.service.ts` が「送信前（`pre_send`）」で作成。
   取り込み時点では顧客通知を送らない。
+  - 作成時点の **店舗名・住所スナップショット**（`shop_name` / `shop_address`）も取り込んだ店舗の値で保存する
+    （手動作成と揃え、送信本文の店舗名解決を両経路で同一にする・GTSS-817 #27）。
 - 保存先: **Aurora PostgreSQL `cancellations` テーブル**（drizzle。旧 DynamoDB は移行元のみ・ランタイム不参照）。
 
 ### 2. 送信（決済リンク送信）
