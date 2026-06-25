@@ -122,6 +122,31 @@
   3. `{ exact: true }` を指定
   4. より具体的なロケーター（`getByRole('columnheader', { name: '...' })`等）を使う
 
+### 同ラベルのボタンを共有画面に追加したら他スペックの未スコープ locator を壊す → container スコープ + フル e2e（必須）
+- **問題**: 共有画面（例: 申込詳細）に新しい「保存」ボタンを追加したら、別スペック（`company-detail-context.spec.ts`）の**未スコープな** `page.getByRole('button', { name: '保存' })` が複数マッチして strict mode 違反で落ちた。自分が触ったスペック（application/cancellation）だけ実行していたため初回は見逃し、**フル e2e スイート実行で初めて発覚**した。
+- **正しい対応**:
+  1. アクション系ボタンの locator は必ず container/testid にスコープする: `page.getByTestId('salonboard-confirm').getByRole('button', { name: '保存' })`。他スペックが既にこの形なら、ボタン追加で壊れない。
+  2. **共有画面に新規ボタン/要素を足したら、触ったスペックだけでなくフル e2e を実行**してから完了とする。
+- **注意**: `getByRole(name)` は既定で**部分一致**。`代理店コードを保存` に改名しても `name: '保存'` クエリにヒットするため、改名では衝突回避できない。スコープ（container 限定）か `{ exact: true }` で解決する。
+- **関連**: 「getByText()のstrict mode違反」。同じ strict mode 問題が getByRole の name 部分一致でも起きる。
+
+### `fill()` 後の `toHaveValue(同値)` は保存往復を検証しない（必須）
+- **問題**: 入力欄を `fill('other')` してから保存ボタンを押し、`expect(input).toHaveValue('other')` で確認するテストは、**保存が一切効かなくても緑**になる（値は fill が既にセット済みのため）。
+- **正しい対応**: 保存の往復を verify する。`page.waitForRequest`(PUT/POST) で送信 payload を確認する／成功トーストを待つ／再取得（reload またはクライアント遷移）後に反映を確認する。
+- **例**:
+  ```ts
+  // ❌ NG: fill 済みなので保存が壊れても緑
+  await input.fill('other');
+  await saveBtn.click();
+  await expect(input).toHaveValue('other');
+
+  // ✅ OK: PUT 発行と payload を確認
+  const put = page.waitForRequest(r => r.url().includes('/agent-code') && r.method() === 'PUT');
+  await input.fill('other');
+  await saveBtn.click();
+  expect(JSON.parse((await put).postData() || '{}').agentCode).toBe('other');
+  ```
+
 ### auto-auth fixtureパターン（storageStateセッション切れ対策）
 - **問題**: storageStateで保存したセッションが85-120秒程度で期限切れになり、後半のテストでログインページが表示されて失敗する
 - **正しい対応**: `test.extend` でauto-authフィクスチャを作成し、ページ遷移時にサイドバーが見えなければ自動で再認証する。全テストファイルでこのフィクスチャを `import { test } from './fixtures'` で使用する

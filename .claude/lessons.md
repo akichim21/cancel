@@ -88,6 +88,11 @@
 - **問題**: 遅延読み込みするモジュールは循環依存があると実行時だけ `default of undefined` 等で落ち、通常の render test では見逃しやすい
 - **正しい対応**: 修正時は禁止 import のソース検査と `await import(...)` の smoke import を追加し、構造的に再発を防ぐ
 
+### spread passthrough な serializer に機微フィールドを足すと無認可エンドポイントから漏れる
+- **問題**: `serializeApplication` が `{ ...item }` で全フィールドを透過するため、スキーマに `agentCode`（代理店コード）列を足しただけで、`requireAdmin` の無い `GET /applications` / `GET /applications/:id` のレスポンスに機微フィールドが乗った（GTSS-836。既存の認可ギャップが顕在化）。これらの GET は以前から email/phone 等の PII も無認可で返していた。
+- **正しい対応**: spread passthrough な serializer / repository（`{ ...item }` や `getTableColumns` 由来の全列出し入れ）を使うエンティティに機微フィールドを追加するときは、**その serializer を返す全エンドポイントの認可を確認する**。サロン/顧客向けと admin 向けで露出が異なるなら、(a) エンドポイントに `requireAdmin` を付ける、(b) 公開向けは別 serializer で機微フィールドを除外する。「画面に出さない」だけでは API 契約レベルの漏洩は塞げない。
+- **検証**: 新フィールドを返し得る全 GET を grep し、各々の認可ガード（`requireAdmin`/`requireAuth`/無認可）と消費者（フロント側 grep）を確認する。テストは「非admin/未認証応答に機微フィールドが出ない（401/403）／admin応答には出る」を固定する。
+
 ### サブエージェントの cross-file 指摘は必ず再検証する
 - **事例**: hotel PR #1938 で submit ボタン非表示ロジックを親コンポーネント (`BookingForm.tsx`) だけ読んで「消えない」と誤指摘し、そのまま行コメント投稿してしまった。
 - **原因**: 描画層が子コンポーネント (`BookingStepFormSecond.tsx` の `showBlockedGuide` 判定) に委譲されていることを見逃した。サブエージェントが onSubmit ハンドラーだけを読み、JSX レンダリング層 / 子コンポーネントを追跡しなかった。
