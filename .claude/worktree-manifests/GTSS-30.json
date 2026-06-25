@@ -1,0 +1,36 @@
+{
+  "issueNumber": 30,
+  "branchName": "GTSS-836",
+  "baseBranchOverride": "per-repo: api=GTSS-817-29, lp=feature/GTSS-13, admin=GTSS-817",
+  "worktreeDir": "GTSS-836",
+  "slot": 7,
+  "ports": {
+    "api": 1345,
+    "admin": 3007,
+    "userPortal": 5180,
+    "lp": 5280
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-836",
+      "branch": "GTSS-836",
+      "baseBranch": "GTSS-817-29"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/GTSS-836",
+      "branch": "GTSS-836",
+      "baseBranch": "GTSS-817"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-836",
+      "branch": "GTSS-836",
+      "baseBranch": "feature/GTSS-13"
+    }
+  }
+}

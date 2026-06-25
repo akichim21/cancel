@@ -77,6 +77,29 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 
 - Stripe Connect の destination charges でサロンの connected account へ入金。
 
+## 精算用CSVの出力（代理店コード・支払日列／支払日期間フィルタ）
+
+運営が月次精算の元データとして、キャンセル請求管理画面（admin）から**CSVを出力**できる（GTSS-836 / #30）。
+CSVはクライアント側で生成し、画面の絞り込み結果（`filteredInvoices`）をそのまま書き出す。詳細は
+`docs/product/agent-code.md`。
+
+- **追加2列（末尾）**: 既存16列の末尾に **代理店コード**（発生元申込の `agentCode`。未設定は空）と
+  **支払日**（支払い完了日時 `paidAt` を JST 表示。未払い行は空）を追加する。既存列順・PII列（お客様名/
+  電話/メール）・「ステータス」列は不変。**CSVに口座番号は出力しない**（元々データに存在しない）。5%額・料率・
+  還元期間などの計算は含めない（生データのみ）。
+- **支払日期間フィルタ**: 絞り込みバーに支払日の開始日・終了日の日付ピッカーを追加。指定すると、支払日が
+  その範囲（JST 暦日・両端含む）に含まれる請求のみが**一覧表示・CSV出力の対象**になる。範囲外および**未払い
+  （支払日なし）請求は除外**。未指定のときは全件（支払日の有無に関わらず）が対象。期間指定は一覧と CSV の
+  双方に効く（`filteredInvoices` が CSV 出力元のため）。
+- **元データ（API）**: `GET /cancellations`（**管理者専用 = `requireAdmin`**）の各行に発生元申込の
+  `agentCode` を付与する（会社スコープ `?applicationId=`・グローバル一覧の双方で同一形状）。支払日 `paidAt` は
+  既にレスポンスに含まれる。CSVおよびこの元データは admin 限定であり、代理店へ共有する非PIIデータは運営が
+  スプレッドシートへ手転記して生成する（顧客PIIを代理店へ渡さない）。
+
+> 実装: `cancel-billing-service-admin/src/constants/cancellationStatus.ts`（CSVヘッダ/行・`filterCancellations`
+> の `paidFrom`/`paidTo`）/ `src/components/CancellationManagement.tsx`（支払日ピッカー）/
+> `cancel-billing-service-api/src/repositories/cancellations.repository.ts`（一覧へ `agentCode` 付与）。
+
 ## データモデル（Aurora PostgreSQL）
 
 `cancellations`（`cancel-billing-service-api/src/db/schema.ts`）。主なカラム:
