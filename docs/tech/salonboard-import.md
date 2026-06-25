@@ -285,8 +285,11 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 ### テーブル
 
 - `cancellations`:
-  - 発生店舗 `shopId`(FK→`shops.id` **ON DELETE SET NULL**) ＋ 作成時点の `shopName` / `shopAddress`
-    **スナップショット**（店舗削除後も本文・一覧の店舗名/住所を保全）。
+  - 発生店舗 `shopId`(FK→`shops.id`)。**表示**（一覧・詳細の店舗名/住所）は `shopId` から解決した店舗マスタを使う
+    （`storeName`/`storeAddress` = `shops` JOIN）。店舗は**論理削除のみ**（`deletedAt`）で物理削除しないため `shopId` は
+    保持され、削除後も JOIN で解決できる（FK の `ON DELETE SET NULL` は安全弁で通常フローでは発火しない・#27）。
+  - 作成時点の `shopName` / `shopAddress` **スナップショット**は**送信本文（SMS/メール/Stripe 明細）の凍結用**で、
+    **手動・取り込みの両経路**で保存する。表示には使わない（`storeName`/`storeAddress` と二重表示しない）。
   - 取り込み列: `source` / `externalReservationId` / `reservationStatus` / `cancellationType` / `paymentType` /
     `cancellationPolicy` / `receivedAt` / `customerNameKana` / `externalCanceledAt`（キャンセル日。サロンボード一覧の
     更新日時。`createdAt`＝取り込み実行日とは別。一覧・詳細・送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
@@ -334,12 +337,16 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 
 逆 migration は `src/db/migrations/rollback/0012_*.down.sql`。
 
-### 店舗削除の連鎖
+### 店舗削除の連鎖（論理削除）
 
-`shops` を削除すると:
-- `shop_integrations`・店舗単位 `external_integrations`（暗号化認証情報）は **ON DELETE CASCADE** で一緒に削除。
-- `cancellations` / `external_import_logs` の `shop_id` は **ON DELETE SET NULL**（過去請求・監査ログは残り、
-  請求の店舗名は `cancellations.shop_name` スナップショットで保全される）。
+店舗削除（`deleteShop`）は **`shops` 行を物理削除せず論理削除**（`deletedAt` をセット）する。これにより:
+- `cancellations` / `external_import_logs` の `shop_id` は **保持される**（`shops` 行が残るため FK SET NULL は発火しない）。
+  一覧・詳細・送信本文の店舗名/住所は `shop_id` JOIN で解決し続ける（`getById`・一覧 JOIN は `deletedAt` を弾かない）。
+- `shop_integrations`・店舗単位 `external_integrations`（暗号化認証情報）のみ **物理削除**（削除済み店舗に機微情報を残さない）。
+
+> FK 上は `cancellations`/`external_import_logs`.`shop_id` を `ON DELETE SET NULL`、`shop_integrations`/
+> `external_integrations`.`shop_id` を `ON DELETE CASCADE` で定義しているが、通常フローは論理削除のため
+> `cancellations` 側の SET NULL は発火しない（DB レベルの安全弁）。
 
 ## 退会（申請削除）時のマスク
 
@@ -378,8 +385,9 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 - `PUT /admin/shops/:id` `{shopName?, shopAddress?, loginId?, password?}` — 名前/住所更新（連携なし・連携済みとも可）／
   後付け連携・再連携。**再連携**は自動取得した外部店舗IDが**既存リンクの外部店舗IDと一致**することを要求し、別店舗なら拒否。
   会社内の**別店舗が同一外部店舗IDを既に連携済み**なら拒否（`UNIQUE(application_id, source, external_store_id)`）。
-- `DELETE /admin/shops/:id` — 店舗削除（`shop_integrations`・店舗単位認証情報は CASCADE。`cancellations`/
-  `external_import_logs` の `shop_id` は SET NULL で残る）。連携単位 `company` は 4xx 拒否（クロール由来）。
+- `DELETE /admin/shops/:id` — 店舗削除（**論理削除**＝`deletedAt`。`shop_integrations`・店舗単位認証情報のみ物理削除。
+  `cancellations`/`external_import_logs` の `shop_id` は保持され店舗名/住所は JOIN で解決し続ける）。連携単位 `company`
+  は 4xx 拒否（クロール由来）。
 - `POST /admin/salonboard/shop-verify` `{applicationId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
   店舗一覧は返さない・会社アカウント/取得不可はエラー）。
 - `PUT /admin/applications/:applicationId/integration-unit?source=salonboard` `{unit}` — 連携単位の設定。lock 済みは 4xx
@@ -408,9 +416,11 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 ### 送信時の店舗名/住所解決（#27）
 
 SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解決する:
-`cancellation.shop_name`（手動作成スナップショット）→ `shop_id` から解決した店舗 →
-会社名（`partnerName`/`businessName`。**住所は会社名フォールバックなし**）。これで手動・取り込みの双方で会社名ではなく
-**発生店舗名**が本文に出る（取り込み請求も従来の会社名表記から発生店舗名に変わる＝意図的な変更）。
+`cancellation.shop_name`（作成時点スナップショット。**手動・取り込み両経路で保存**）→ `shop_id` から解決した店舗
+（スナップショットが空の旧データのフォールバック）→ 会社名（`partnerName`/`businessName`。**住所は会社名フォールバックなし**）。
+これで手動・取り込みの双方で会社名ではなく **発生店舗名**が本文に出る（取り込み請求も従来の会社名表記から発生店舗名に
+変わる＝意図的な変更）。なお**画面表示**（一覧・詳細）は別系統で、常に `shop_id` 解決の `storeName`/`storeAddress` を使い
+スナップショットとは二重表示しない。
 
 ## テスト
 

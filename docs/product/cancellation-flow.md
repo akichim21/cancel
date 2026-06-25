@@ -64,8 +64,8 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 - Stripe Checkout Session を作成し、顧客にメール (SES) / SMS (Twilio) で決済リンクを送信。
   通知チャネルは顧客連絡先有無で決定（メール優先、無ければ SMS）。送信後ステータスは請求中(`pending`)。
 - **送信時の店舗名／住所（SMS／メール本文・Stripe 明細）**: 次の順で解決する（GTSS-817 #27）:
-  1. `cancellation.shop_name` / `shop_address`（手動作成時のスナップショット）
-  2. `shopId` から解決した店舗（取り込み請求はここで発生店舗名になる）
+  1. `cancellation.shop_name` / `shop_address`（作成時点のスナップショット。**手動・取り込み両経路で保存**）
+  2. `shopId` から解決した店舗（スナップショットが空の旧データのフォールバック）
   3. 会社名（`partnerName` / `businessName`。**住所は会社名フォールバックなし**＝住所が無ければ住所は空）
   これにより手動・取り込みの双方で、本文に出るのが会社名ではなく**発生店舗名**になる（取り込み請求も従来の
   会社名表記から発生店舗名へ変わる＝意図的な変更）。
@@ -113,8 +113,12 @@ CSVはクライアント側で生成し、画面の絞り込み結果（`filtere
 - `customerName` / `customerNameKana` / `customerEmail` / `customerPhone`（顧客 PII。退会時マスク）
 - `amount`（キャンセル料）/ `appointmentAmount`（予約金額）/ `paidAmount` / `platformFee` / `stripeFee`
 - `appointmentDate` / `startTime` / `menuName` / `staffName`
-- 発生店舗: `shopId`(FK→`shops.id`、当サービスの店舗マスタ。店舗削除時は ON DELETE SET NULL) /
-  `shopName` / `shopAddress`（作成時点のスナップショット。店舗が消えても本文・一覧の店舗名を保全）
+- 発生店舗: `shopId`(FK→`shops.id`、当サービスの店舗マスタ) / `shopName` / `shopAddress`
+  - **表示**（一覧・詳細）は `shopId` から解決した店舗マスタ名・住所（`storeName` / `storeAddress`）を使う。
+    店舗は**論理削除のみ**（`deletedAt`）で物理削除しないため `shopId` は保持され、削除後も JOIN で解決できる
+    （DB の FK は安全弁として `ON DELETE SET NULL` だが通常フローでは発火しない・GTSS-817 #27）。
+  - `shopName` / `shopAddress`（`cancellations` 列）は**送信本文の凍結用スナップショット**で、手動・取り込み
+    両経路で作成時点の値を保存する。詳細表示には使わない（`storeName`/`storeAddress` と二重表示しない）。
 - 取り込み（GTSS-817）: `source` / `externalReservationId` /
   `reservationStatus` / `cancellationType` / `paymentType` / `cancellationPolicy` / `receivedAt`
 - 冪等キー: `(shopId, externalReservationId)` 部分ユニーク（手動作成は `externalReservationId` NULL で対象外）
