@@ -131,8 +131,8 @@ GTSS-19 の論理削除を拡張する。業務挙動の概要は `docs/product/
 - **新テーブル**: `shops`（会社→店舗 1:N の店舗マスタ。当初 `external_shops`、migration `0006` で改名、`0012` で
   媒体別連携を `shop_integrations` へ分離し店舗名・住所のみ保持）/ `shop_integrations`（1 店舗 × N 媒体の連携リンク。
   `source`/`external_store_id`/`salon_type`/`linked`。GTSS-817 #27）/ `external_integrations`（会社×連携元の認証情報。
-  パスワードは AES-256-GCM envelope で `encrypted_secret` に保管。`external_shop_id`=`shops.id`）/ `external_import_logs`
-  （対象外/スキップの監査ログ・予約単位 upsert）。`cancellations` に取り込み用カラム + `(externalShopId, externalReservationId)`
+  パスワードは AES-256-GCM envelope で `encrypted_secret` に保管。`shop_id`=`shops.id`）/ `external_import_logs`
+  （対象外/スキップの監査ログ・予約単位 upsert）。`cancellations` に取り込み用カラム + `(shopId, externalReservationId)`
   部分ユニーク（冪等キー。手動作成は両 NULL で対象外）。migration `0003`（`sent`→`pending` バックフィル含む）。
 - **`createInvoice` の保存/送信分割**: 取り込みは「保存のみ」（`cancellationsRepo.createImported` で `pre_send` 作成・
   通知なし）、送信は `cancellation-send.service.ts`（運営=`requireAdmin` / サロン=`requireAuth`+所有者チェックの

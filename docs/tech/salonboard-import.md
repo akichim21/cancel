@@ -277,7 +277,7 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 
 ### FK 命名規約（重要）
 
-- `external_shop_id` = **当サービスの店舗（`shops.id`）への FK**。`cancellations` / `external_import_logs` /
+- `shop_id` = **当サービスの店舗（`shops.id`）への FK**。`cancellations` / `external_import_logs` /
   `external_integrations` で使う。
 - `shop_integrations.external_store_id` = **外部媒体側の店舗ID**（サロンボードの `H…`）。
 - 媒体は専用カラム名ではなく **`source` + `external_store_id` の組**で表現する（source 駆動を維持）。
@@ -285,12 +285,12 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 ### テーブル
 
 - `cancellations`:
-  - 発生店舗 `externalShopId`(FK→`shops.id` **ON DELETE SET NULL**) ＋ 作成時点の `shopName` / `shopAddress`
+  - 発生店舗 `shopId`(FK→`shops.id` **ON DELETE SET NULL**) ＋ 作成時点の `shopName` / `shopAddress`
     **スナップショット**（店舗削除後も本文・一覧の店舗名/住所を保全）。
   - 取り込み列: `source` / `externalReservationId` / `reservationStatus` / `cancellationType` / `paymentType` /
     `cancellationPolicy` / `receivedAt` / `customerNameKana` / `externalCanceledAt`（キャンセル日。サロンボード一覧の
     更新日時。`createdAt`＝取り込み実行日とは別。一覧・詳細・送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
-  - **冪等キー**: `(external_shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
+  - **冪等キー**: `(shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
     手動作成（`external_reservation_id` NULL）は NULLS DISTINCT で対象外。別店舗の同一予約 ID は別請求として作成される。
 - `shops`（店舗マスタ）: **`id` / `application_id` / `shop_name` / `shop_address` / `created_at` / `updated_at`** のみ。
   会社→店舗 1:N。`source` / `external_store_id` / `salon_type` / `linked` は**持たない**（#27 で `shop_integrations` へ移設）。
@@ -308,12 +308,12 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
   が 1 件でもあれば lock（`unitLocked = external_integrations.existsLinked OR shop_integrations.anyLinked`）。
   `getEffectiveUnit` は従来どおり（settings=`company` または会社単位の linked 認証情報あり → `company`、それ以外 `shop`）。
 - `external_integrations`（認証情報・**#27 で構造は不変**）: `loginId` + `encryptedSecret`（envelope）+ `linked` +
-  nullable `external_shop_id`（FK→`shops.id` ON DELETE CASCADE）。`external_shop_id`（=`shops.id`、NULL=会社単位行）で
-  キーされる。会社単位は `external_shop_id IS NULL` の 1 行、店舗単位は店舗ごとに 1 行。
-  UNIQUE は `(application_id, source, external_shop_id)` **NULLS NOT DISTINCT**（PG15+。会社行の NULL を 1 行に制約）。
+  nullable `shop_id`（FK→`shops.id` ON DELETE CASCADE）。`shop_id`（=`shops.id`、NULL=会社単位行）で
+  キーされる。会社単位は `shop_id IS NULL` の 1 行、店舗単位は店舗ごとに 1 行。
+  UNIQUE は `(application_id, source, shop_id)` **NULLS NOT DISTINCT**（PG15+。会社行の NULL を 1 行に制約）。
   パスワードは AES-256-GCM 暗号化のまま・レスポンスには出さない（`hasPassword` のみ）。
 - `external_import_logs`: 対象外/スキップの生データ（payload JSON）+ 理由 + 対象期間。`application_id` カラムで会社
-  フィルター可。`external_shop_id`(FK→`shops.id` **ON DELETE SET NULL**)。`(externalShopId, externalReservationId)`
+  フィルター可。`shop_id`(FK→`shops.id` **ON DELETE SET NULL**)。`(shopId, externalReservationId)`
   UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
   作成成功（リトライ成功）時は当該予約のログ行を削除し、キャンセル一覧との矛盾を解消する。
 - `external_import_runs`: **取り込みの実行単位ログ**。#23 で **会社（＋source）ごとに1行**（nullable `application_id`
@@ -338,7 +338,7 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 
 `shops` を削除すると:
 - `shop_integrations`・店舗単位 `external_integrations`（暗号化認証情報）は **ON DELETE CASCADE** で一緒に削除。
-- `cancellations` / `external_import_logs` の `external_shop_id` は **ON DELETE SET NULL**（過去請求・監査ログは残り、
+- `cancellations` / `external_import_logs` の `shop_id` は **ON DELETE SET NULL**（過去請求・監査ログは残り、
   請求の店舗名は `cancellations.shop_name` スナップショットで保全される）。
 
 ## 退会（申請削除）時のマスク
@@ -379,7 +379,7 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
   後付け連携・再連携。**再連携**は自動取得した外部店舗IDが**既存リンクの外部店舗IDと一致**することを要求し、別店舗なら拒否。
   会社内の**別店舗が同一外部店舗IDを既に連携済み**なら拒否（`UNIQUE(application_id, source, external_store_id)`）。
 - `DELETE /admin/shops/:id` — 店舗削除（`shop_integrations`・店舗単位認証情報は CASCADE。`cancellations`/
-  `external_import_logs` の `external_shop_id` は SET NULL で残る）。連携単位 `company` は 4xx 拒否（クロール由来）。
+  `external_import_logs` の `shop_id` は SET NULL で残る）。連携単位 `company` は 4xx 拒否（クロール由来）。
 - `POST /admin/salonboard/shop-verify` `{applicationId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
   店舗一覧は返さない・会社アカウント/取得不可はエラー）。
 - `PUT /admin/applications/:applicationId/integration-unit?source=salonboard` `{unit}` — 連携単位の設定。lock 済みは 4xx
@@ -401,14 +401,14 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 ### 手動キャンセル請求作成の店舗解決（#27）
 
 `createInvoice`（`invoice.service.ts`）は請求書作成画面から **`shopId`** を受け取り、自社店舗として解決して
-`cancellations.external_shop_id` に紐づけ、作成時点の **店舗名/住所スナップショット**（`shop_name`/`shop_address`）を保存する。
+`cancellations.shop_id` に紐づけ、作成時点の **店舗名/住所スナップショット**（`shop_name`/`shop_address`）を保存する。
 請求書作成画面は店舗名/住所のフリーテキスト入力を**廃止**し登録済み店舗の **select** に変更（店舗 0 件なら作成不可・
 施設管理画面への導線を表示）。旧形式（`shopName` のみ）は **400 で即時撤去**。
 
 ### 送信時の店舗名/住所解決（#27）
 
 SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解決する:
-`cancellation.shop_name`（手動作成スナップショット）→ `external_shop_id` から解決した店舗 →
+`cancellation.shop_name`（手動作成スナップショット）→ `shop_id` から解決した店舗 →
 会社名（`partnerName`/`businessName`。**住所は会社名フォールバックなし**）。これで手動・取り込みの双方で会社名ではなく
 **発生店舗名**が本文に出る（取り込み請求も従来の会社名表記から発生店舗名に変わる＝意図的な変更）。
 
