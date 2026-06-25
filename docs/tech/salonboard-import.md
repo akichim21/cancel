@@ -94,6 +94,20 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 - 会社単位は groupTop の区分テーブル（`biyouStoreInfoArea`=hair / `kireiStoreInfoArea`=kirei）で種別が決まり、`parseSalons` が各店舗に `salonType` を付与する。
 - 注: `/CNC/mgr/storeBaseInfo/` は `?designKbn=` 無しの直接 GET だとシステムエラーになる（店舗トップのリンクが `?designKbn=B|K` を保持）。
 
+#### 店舗住所の取得（storeInfoPreview スクレイピング・GTSS-817 #28・2026-06-25 実機検証）
+
+店舗単位連携の verify が店舗（`{externalStoreId, shopName, salonType}`）の解決に成功した後、**同一セッションが生存している間（`client.close()` 前）**に掲載管理プレビュー（`storeInfoPreview`）から店舗住所を取得し、`ShopVerifyResult.shop.shopAddress` に入れる（`fetchShopAddressSafely`）。会社単位連携は対象外（`verifySalonboardLogin` 経路には差し込まない。店舗ごと forward のタイムアウト懸念）。
+
+- **取得は素の `GET`（Struts TOKEN 不要）**。`プレビューを見る` ボタンは `org.apache.struts.taglib.html.TOKEN`/`STORE_ID`/`modified` 付き POST だが、ログイン済み店舗セッションでは素の GET でも同一の住所ページが返る（POST から TOKEN を抜いても 200・住所あり。店舗はセッション cookie から解決され POST した `STORE_ID` に依存しない）。`reflectTop` への遷移・クリックは不要。
+- **媒体別 URL（末尾スラッシュ差）**: ヘア=`GET /CNB/preview/storeInfoPreview/`（末尾スラッシュ**あり**）/ キレイ=`GET /CNK/preview/storeInfoPreview`（**なし**）。`プレビューを見る` の `onclick`（`sendToStoreInfo(...,'/CNB/preview/storeInfoPreview/',…)` / `'/CNK/preview/storeInfoPreview'`）と一致させる。**逆のスラッシュだと住所無しの空（~3.8KB）ページが返る**。定数 `STORE_INFO_PREVIEW_PATH`（`salonboard-client.ts`）で媒体別に明示。
+- **生 HTML は数値文字参照でエンコードされる**（住所セルが `&#21271;&#28023;&#36947;…`）。`fetch().text()` の生本文をパースするため**必ずデコードが要る**（ブラウザ描画＝Playwright `page.content()` では復号済みだが取得は生 HTTP）。`parseStoreAddress`（`salonboard-parser.ts`）が `住所` ラベルの `<th>`→`<td>` を抽出し、`decodeHtmlEntities`（10進 `&#NNNN;`・16進 `&#xNN;`・`&nbsp;`・`&amp;` 等）でデコード → タグ除去 → 制御文字/全角空白の正規化 → 連続空白の単一化 → 前後トリム → 最大長（200）トリムで 1 行に正規化。住所セル不在・デコード後空文字は `null`。
+- **店舗コンテキストの確立**（HTTP トランスポート）: プレビュー GET は店舗コンテキスト確立後でないと空/エラーになる。0件パス（単一店舗）は `fetchStoreTopHtml`(/CLP/bt/top/) / `fetchKireiStoreTopHtml`(/KLP/top/) または Playwright のログイン着地で確立済み。**1件パス（会社アカウントだが店舗1件）は現状 forward を踏まず即 return するため、住所取得の前に解決済み `externalStoreId` で `enterStore`(designKbn=B) / `enterKireiStore`(designKbn=K) を呼んでコンテキストを確立**してから GET する。
+- **失敗許容（クリティカルパスにしない）**: 取得メソッドの失敗契約は「HTML を返す / CAPTCHA は型付き throw（`SalonboardCaptchaError`）/ 4xx は throw」。verify 側ラッパ（`fetchShopAddressSafely`）が try/catch で握りつぶし `shopAddress=null` とし、verify の `ok` は `false` にしない（住所はオプショナル。店舗ID・店舗名の解決には影響させない）。
+- **空欄補完（空のときだけ）**: 保存（新規連携 `saveSalonboardShop` / 再検証 `updateShop`）の **同一トランザクション内**で `shopsRepo.fillAddressIfEmpty(shopId, shopAddress)` を呼ぶ。`shop_address = COALESCE(NULLIF(BTRIM(shops.shop_address), ''), :新規)` で **空（NULL/空文字/空白のみ）のときだけ**スクレイピング住所をセットし、**既存の実値（運営・サロンの手動編集を含む）は上書きしない**。スクレイピング住所が `null`/空白のときは no-op（変更なし）。保存/一覧レスポンス（`toShopResponse` / `GET /admin/shops`）に `shopAddress` を含む（機微情報は従来どおり返さない）。
+- **取り込み（recurring import）には差し込まない**: 住所取得は連携の verify/保存時のみ。日次バッチ（`salonboard-import.service`）には追加しない（住所はほぼ不変で、毎回取得するとバッチ時間・失敗面が増える。空のときだけ補完なので再検証で随時埋まる）。
+- パーサ/取得: `parseStoreAddress` / `decodeHtmlEntities`（`salonboard-parser.ts`）、`fetchStoreInfoPreviewHtml(salonType, externalStoreId)`（HTTP/Playwright 両実装。`salonboard-client.ts`）。fixture: `store-info-preview-hair.html` / `store-info-preview-kirei.html`（PII置換済み・数値文字参照エンコード）。
+- 注: 店舗住所は**店舗の業務上の所在地であり顧客 PII ではない**ため、非本番の取り込み PII マスク（`mask-imported-pii.ts`）の対象外。ただし fixture 化時は CLAUDE.md の置換規約に従いダミーへ置換する。
+
 ### 一覧 GraphQL（REQ-2/3）と persisted query の自動復旧
 
 - `Content-Type: application/graphql+json`、body は `{"query":"<32桁hex id>","variables":{…}}`（サーバは persisted `id` を `query` フィールドで受ける。完全クエリ文字列でも可）。
