@@ -45,7 +45,7 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 **店舗名では判別せず区分テーブルで抽出する**（実例: 店名「GO TODAY シェアサロン 札幌Alba店」はキレイサロン区分 `kireiStoreInfoArea` に在籍するが、これも取り込み対象）。
 各行から サロンID（`H000…`）＋店舗名を取得（`parseSalons`）。ヘア→キレイの順に並べ、両区分にまたがる重複店舗IDは先勝ち（ヘア優先）で 1 件に畳む。ログイン成功（`userid` 非空）かつ店舗 1 件以上で連携成功。
 
-> **取り込み実行のキレイ対応（GTSS-817-kirei #25 で解決）**: 店舗一覧の抽出に加え、**日次/手動の取り込み実行もヘア＋キレイ両対応**。`shops.salon_type`（`'hair'`/`'kirei'`、NOT NULL default `'hair'`）で店舗種別を保持し、`importShop` が種別で遷移・一覧・詳細の取得経路を出し分ける（`clientOpsFor`）。請求・料率・スキップ理由分類のパイプラインはヘアと共通。ヘア既存経路は不変。
+> **取り込み実行のキレイ対応（GTSS-817-kirei #25 で解決）**: 店舗一覧の抽出に加え、**日次/手動の取り込み実行もヘア＋キレイ両対応**。店舗種別は **`shop_integrations.salon_type`**（`'hair'`/`'kirei'`、媒体別連携リンク側で保持。#27 で `shops` から移設）で保持し、`importShop` が種別で遷移・一覧・詳細の取得経路を出し分ける（`clientOpsFor`）。請求・料率・スキップ理由分類のパイプラインはヘアと共通。ヘア既存経路は不変。
 
 #### キレイ（KLP）経路（GTSS-817-kirei #25・2026-06-19 実機検証）
 
@@ -197,7 +197,10 @@ enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約�
 
 ## 取り込みロジック（REQ-2/3）
 
-1. 連携済み店舗（`external_shops.linked=true`）を会社（`applicationId`）ごとにグルーピング（1 会社 1 ログイン）。
+1. **連携済みの店舗を列挙する**。対象は `shops` ではなく **`shop_integrations.linked=true`**（媒体別連携リンク）で、
+   `findAllLinkedWithShop()` がリンクと店舗マスタを JOIN して返す（id は `shops.id`＝当サービスの店舗ID。認証情報解決・
+   `enterStore` 等はこの id をキーに従来どおり）。連携なし店舗（`shop_integrations` 行を持たない店舗）は対象外。
+   これを会社（`applicationId`）ごとにグルーピング（1 会社 1 ログイン）。
 2. 会社ごと: `external_integrations` から `loginId` + 復号した password でログイン。失敗時は当該会社の全店舗を失敗計上。
 3. 店舗ごと（順次・失敗は他店舗を止めない / AC-21）: `enterStore`（forward）→ 一覧取得（全ページ）。
    - 抽出窓: 来店予定日が「実行日(JST)の3日前〜3か月後」かつ「契約日（`applications.createdAt` の JST 日付）より後（同日含まず）」（`import-window.ts`）。
@@ -255,31 +258,74 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
 
 ## データモデル
 
-- `cancellations` 新カラム: `source` / `externalShopId`(FK→`external_shops`) / `externalReservationId` /
-  `reservationStatus` / `cancellationType` / `paymentType` / `cancellationPolicy` / `receivedAt` / `customerNameKana` /
-  `externalCanceledAt`（キャンセル日。サロンボード一覧の更新日時。`createdAt`＝取り込み実行日とは別。一覧・詳細・
-  送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
-  **冪等キー**: `(external_shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
-  手動作成（両 NULL）は NULLS DISTINCT で対象外。別店舗の同一予約 ID は別請求として作成される。
-- `shops`（#23 で `external_shops` から**リネーム**。FK カラム名 `external_shop_id`/`external_store_id` は不変）:
-  会社→店舗 1:N。`(applicationId, source, externalStoreId)` UNIQUE で upsert。会社単位の再連携時は今回取得されな
-  かった既存店舗を `linked=false` にする。店舗単位では運営が店舗を個別に作成・更新・削除する（店舗CRUD API）。
-- `external_integration_settings`（#23 新規）: `(application_id, source)` PK・`unit`（`company`/`shop`）。連携単位を
-  `(会社, source)` 単位で保持。**行が無い場合は既定 `shop`**。lock（変更不可）はカラムを持たず、当該 `(会社, source)` の
-  `external_integrations.linked=true` または `shops.linked=true` が1件でもあれば**導出**する（lock の唯一条件は `linked=true`）。
-- `external_integrations`: `loginId` + `encryptedSecret`（envelope）+ `linked` + nullable `external_shop_id`（#23 追加・
-  FK→`shops.id` ON DELETE CASCADE）。会社単位は `external_shop_id IS NULL` の1行、店舗単位は店舗ごとに1行。
-  UNIQUE は `(application_id, source, external_shop_id)` **NULLS NOT DISTINCT**（PG15+。会社行の NULL を1行に制約）。
+GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integrations`）を分離**した。`shops` は純粋な店舗台帳
+（連携の有無に依らず存在でき、1 店舗 × N 媒体を表現可能）、`shop_integrations` が媒体ごとの連携リンクを持つ。
+
+### FK 命名規約（重要）
+
+- `external_shop_id` = **当サービスの店舗（`shops.id`）への FK**。`cancellations` / `external_import_logs` /
+  `external_integrations` で使う。
+- `shop_integrations.external_store_id` = **外部媒体側の店舗ID**（サロンボードの `H…`）。
+- 媒体は専用カラム名ではなく **`source` + `external_store_id` の組**で表現する（source 駆動を維持）。
+
+### テーブル
+
+- `cancellations`:
+  - 発生店舗 `externalShopId`(FK→`shops.id` **ON DELETE SET NULL**) ＋ 作成時点の `shopName` / `shopAddress`
+    **スナップショット**（店舗削除後も本文・一覧の店舗名/住所を保全）。
+  - 取り込み列: `source` / `externalReservationId` / `reservationStatus` / `cancellationType` / `paymentType` /
+    `cancellationPolicy` / `receivedAt` / `customerNameKana` / `externalCanceledAt`（キャンセル日。サロンボード一覧の
+    更新日時。`createdAt`＝取り込み実行日とは別。一覧・詳細・送信モーダルの「キャンセル日」表示に使う。手動作成は NULL）。
+  - **冪等キー**: `(external_shop_id, external_reservation_id)` の部分ユニーク（`WHERE external_reservation_id IS NOT NULL`）。
+    手動作成（`external_reservation_id` NULL）は NULLS DISTINCT で対象外。別店舗の同一予約 ID は別請求として作成される。
+- `shops`（店舗マスタ）: **`id` / `application_id` / `shop_name` / `shop_address` / `created_at` / `updated_at`** のみ。
+  会社→店舗 1:N。`source` / `external_store_id` / `salon_type` / `linked` は**持たない**（#27 で `shop_integrations` へ移設）。
+  **連携が 0 件の店舗（連携なし店舗）も存在できる**。運営（店舗単位）・サロン本人ともに作成・更新・削除する（店舗 CRUD API）。
+- `shop_integrations`（#27 新規・媒体別連携リンク）: `id` / `shop_id`(FK→`shops.id` **ON DELETE CASCADE**) /
+  `application_id`(FK→`applications`) / `source` / `external_store_id`（外部媒体側の店舗ID）/ `salon_type`（`hair`/`kirei`）/
+  `linked` / timestamps。
+  - **`UNIQUE(shop_id, source)`**: 1 店舗 × source ごとに最大 1 リンク。
+  - **`UNIQUE(application_id, source, external_store_id)`**: 再連携の冪等キー（旧 `shops`／`external_shops` から移設。
+    会社内で同一外部店舗IDの二重連携を防ぐ）。
+  - 会社単位の再連携時は今回取得されなかった既存リンクを `linked=false` にする。1 会社 × N 媒体・1 店舗 × N 媒体を表現。
+- `external_integration_settings`（連携単位）: `(application_id, source)` PK・`unit`（`company`/`shop`）。**行が無い場合は
+  既定 `shop`**。lock（変更不可）はカラムを持たず**導出**する: 当該 `(会社, source)` の
+  `external_integrations.linked=true`（会社単位の連携済み認証情報）**または** `shop_integrations.linked=true`（連携済み店舗）
+  が 1 件でもあれば lock（`unitLocked = external_integrations.existsLinked OR shop_integrations.anyLinked`）。
+  `getEffectiveUnit` は従来どおり（settings=`company` または会社単位の linked 認証情報あり → `company`、それ以外 `shop`）。
+- `external_integrations`（認証情報・**#27 で構造は不変**）: `loginId` + `encryptedSecret`（envelope）+ `linked` +
+  nullable `external_shop_id`（FK→`shops.id` ON DELETE CASCADE）。`external_shop_id`（=`shops.id`、NULL=会社単位行）で
+  キーされる。会社単位は `external_shop_id IS NULL` の 1 行、店舗単位は店舗ごとに 1 行。
+  UNIQUE は `(application_id, source, external_shop_id)` **NULLS NOT DISTINCT**（PG15+。会社行の NULL を 1 行に制約）。
+  パスワードは AES-256-GCM 暗号化のまま・レスポンスには出さない（`hasPassword` のみ）。
 - `external_import_logs`: 対象外/スキップの生データ（payload JSON）+ 理由 + 対象期間。`application_id` カラムで会社
-  フィルター可。`(externalShopId, externalReservationId)` UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
+  フィルター可。`external_shop_id`(FK→`shops.id` **ON DELETE SET NULL**)。`(externalShopId, externalReservationId)`
+  UNIQUE で upsert（重複排除）。顧客 PII を含むため退会時マスク対象。
   作成成功（リトライ成功）時は当該予約のログ行を削除し、キャンセル一覧との矛盾を解消する。
-- `external_import_runs`: **取り込みの実行単位ログ**。#23 で **会社（＋source）ごとに1行**へ変更（nullable `application_id`
-  ＋index 追加。過去行は NULL のままバックフィルせず、`?applicationId=` フィルター時は除外・無指定では全社表示）。
+- `external_import_runs`: **取り込みの実行単位ログ**。#23 で **会社（＋source）ごとに1行**（nullable `application_id`
+  ＋index。過去行は NULL のままバックフィルせず、`?applicationId=` フィルター時は除外・無指定では全社表示）。
   `triggerType`（`scheduled`/`manual`）/ `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) /
   `shops`(JSON・店舗別の内訳＋失敗 error) / `error` / `startedAt` / `finishedAt`。集計値のみで PII を含まない。
   管理画面「取り込み実行履歴」/ `GET /import-runs?applicationId=`。
 - **マルチソース**: 上記すべてが `source` を含むため、同一会社で `salonboard`/`rakuten_beauty`/`own_site` 等の
-  レコードが衝突せず並列に保持できる（連携単位設定も source ごとに独立）。
+  レコードが衝突せず並列に保持できる（連携単位設定も source ごとに独立。1 店舗が複数 source の連携を持てる）。
+
+### Migration 0012（`src/db/migrations/0012_gtss817_shop_integrations.sql`）
+
+参照保全のため **`shops.id` は作り直さない**。手順:
+1. `shop_integrations` を作成（上記 UNIQUE 制約付き）。
+2. 既存 `shops` から **1:1 backfill**（`source` / `external_store_id` / `salon_type` / `linked` を値保全して移送）。
+3. `shops.shop_address` を追加。
+4. `shops` の旧列（`source` / `external_store_id` / `salon_type` / `linked`）と旧 UNIQUE を削除。
+
+逆 migration は `src/db/migrations/rollback/0012_*.down.sql`。
+
+### 店舗削除の連鎖
+
+`shops` を削除すると:
+- `shop_integrations`・店舗単位 `external_integrations`（暗号化認証情報）は **ON DELETE CASCADE** で一緒に削除。
+- `cancellations` / `external_import_logs` の `external_shop_id` は **ON DELETE SET NULL**（過去請求・監査ログは残り、
+  請求の店舗名は `cancellations.shop_name` スナップショットで保全される）。
 
 ## 退会（申請削除）時のマスク
 
@@ -305,20 +351,52 @@ KMS クライアントは `clients.ts` で lazy require（local/test では読�
 （`external_import_runs`）と一覧で結果を確認する。**local/test**は batch Lambda が無いため同期実行し件数を返す。
 non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunction` 権限が必要。
 
-### 連携単位・店舗CRUD API（#23・すべて `requireAdmin`）
+### 運営・連携単位・店舗CRUD API（`requireAdmin`）
 
-- `GET /admin/shops?applicationId=` — 当該会社の店舗一覧。
-- `POST /admin/shops` `{applicationId, source?, loginId, password, shopName?}` — 店舗単位の作成（店舗単位verify→1Txで店舗＋
-  店舗単位認証情報を保存・`linked=true`）。連携単位が `company` の `(会社,source)` は 4xx 拒否。
-- `PUT /admin/shops/:id` `{shopName?, loginId?, password?}` — 表示名更新／再連携（同一店舗ID upsert）。
-- `DELETE /admin/shops/:id` — 店舗削除（FK CASCADE で店舗単位認証情報も削除。`cancellations`/`external_import_logs` は
-  `external_shop_id` が SET NULL で残る）。`company` は 4xx 拒否。
+店舗マスタと連携が分離（#27）したため、店舗 CRUD は**連携なし店舗の作成**と**後付け連携**を扱う。
+
+- `GET /admin/shops?applicationId=` — 当該会社の店舗一覧（店舗マスタ＋連携リンクの有無）。
+- `POST /admin/shops` `{applicationId, shopName, shopAddress?, source?, loginId?, password?}` — 店舗作成。
+  - `loginId`/`password` **省略可**＝**連携なし店舗**（店舗名必須・住所任意で店舗マスタのみ作成）。
+  - `loginId`/`password` あり＝店舗単位 verify → 1Tx で店舗マスタ＋`shop_integrations`（`linked=true`）＋店舗単位
+    認証情報を保存。**初回連携**は自動取得した外部店舗IDをそのまま採用（一致チェックなし）。
+  - 連携を付与するケースで連携単位が `company` の `(会社,source)` は 4xx 拒否。
+- `PUT /admin/shops/:id` `{shopName?, shopAddress?, loginId?, password?}` — 名前/住所更新（連携なし・連携済みとも可）／
+  後付け連携・再連携。**再連携**は自動取得した外部店舗IDが**既存リンクの外部店舗IDと一致**することを要求し、別店舗なら拒否。
+  会社内の**別店舗が同一外部店舗IDを既に連携済み**なら拒否（`UNIQUE(application_id, source, external_store_id)`）。
+- `DELETE /admin/shops/:id` — 店舗削除（`shop_integrations`・店舗単位認証情報は CASCADE。`cancellations`/
+  `external_import_logs` の `external_shop_id` は SET NULL で残る）。連携単位 `company` は 4xx 拒否（クロール由来）。
 - `POST /admin/salonboard/shop-verify` `{applicationId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
   店舗一覧は返さない・会社アカウント/取得不可はエラー）。
 - `PUT /admin/applications/:applicationId/integration-unit?source=salonboard` `{unit}` — 連携単位の設定。lock 済みは 4xx
-  （同一単位の再送は冪等成功）。
+  （同一単位の再送は冪等成功）。lock は `external_integrations.linked` または `shop_integrations.linked` から導出。
 - `GET /admin/salonboard/integration/:applicationId` — レスポンスに `unit`/`unitLocked` を追加。
 - 一覧3系統 `GET /cancellations|/import-logs|/import-runs` に任意 `?applicationId=` フィルター（無指定は全件＝後方互換）。
+
+### サロンポータル 施設（店舗）管理 API（#27・`requireAuth`・自社スコープ）
+
+サロン本人が自社の**連携なし店舗**を管理する。連携の認証情報・外部媒体側の店舗ID・連携操作は扱わない。
+
+- `GET /shops` — 自社店舗一覧。
+- `POST /shops` `{shopName, shopAddress?}` — 連携なし店舗の作成。**連携単位を問わず作成可**（会社単位会社でも可）だが、
+  サロン作成の連携なし店舗は**取り込み対象外の独立店舗**。
+- `PUT /shops/:id` `{shopName?, shopAddress?}` — 名前/住所編集（連携済み店舗も名前/住所のみ編集可）。
+- `DELETE /shops/:id` — 連携なし店舗の削除。**連携済み店舗は削除不可**（サロンボード連携操作も不可）。
+- レスポンスは **`{id, shopName, shopAddress, linked, …}` のみ**＝連携情報・外部店舗ID・認証情報は返さない。
+
+### 手動キャンセル請求作成の店舗解決（#27）
+
+`createInvoice`（`invoice.service.ts`）は請求書作成画面から **`shopId`** を受け取り、自社店舗として解決して
+`cancellations.external_shop_id` に紐づけ、作成時点の **店舗名/住所スナップショット**（`shop_name`/`shop_address`）を保存する。
+請求書作成画面は店舗名/住所のフリーテキスト入力を**廃止**し登録済み店舗の **select** に変更（店舗 0 件なら作成不可・
+施設管理画面への導線を表示）。旧形式（`shopName` のみ）は **400 で即時撤去**。
+
+### 送信時の店舗名/住所解決（#27）
+
+SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解決する:
+`cancellation.shop_name`（手動作成スナップショット）→ `external_shop_id` から解決した店舗 →
+会社名（`partnerName`/`businessName`。**住所は会社名フォールバックなし**）。これで手動・取り込みの双方で会社名ではなく
+**発生店舗名**が本文に出る（取り込み請求も従来の会社名表記から発生店舗名に変わる＝意図的な変更）。
 
 ## テスト
 
@@ -334,5 +412,10 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
   送信・手動取り込み・バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
   **#23 追加**: 店舗単位 verify/save・店舗CRUD・連携単位/lock・一覧の `applicationId` フィルター・実行記録の会社単位化・
   マルチソース独立・リネーム回帰（`external_shops`→`shops`）。
+  **#27 追加**: 店舗マスタと連携の分離（`shop_integrations`）— 連携なし店舗の作成/編集/削除、後付け連携と
+  再連携の外部店舗ID一致・二重連携拒否、連携列挙の `shop_integrations.linked` 化（`findAllLinkedWithShop`）、
+  lock の `external_integrations.existsLinked OR shop_integrations.anyLinked` 導出、サロンポータル `/shops` CRUD
+  （自社スコープ・連携情報を返さない）、手動作成の `shopId` 解決＋店舗名/住所スナップショット・旧 `shopName` 形式の 400、
+  送信時の店舗名/住所解決順、店舗削除の連鎖（CASCADE / SET NULL）、Migration 0012 の backfill 値保全。
 - fixture（`src/__tests__/fixtures/salonboard/`）は実 HTTP 採取レスポンスを**PII マスクして**作成（生 PII は非コミット）。
   #23 で `group-top-single-store.html`（単一店舗の groupTop システムエラー）/ `store-top-single.html`（店舗TOP）を追加。

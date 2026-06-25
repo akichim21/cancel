@@ -39,6 +39,13 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 
 - 手動: 管理画面 `cancel-billing-service-admin/src/components/CancellationManagement.tsx` /
   サロン向け `cancel-billing-service/src/components/InvoiceForm.tsx`。作成と同時に送信。
+  - **店舗は登録済み店舗から select**（GTSS-817 #27）。店舗名・住所のフリーテキスト入力は廃止し、自社の
+    登録済み店舗（店舗マスタ）を選んで `shopId` を送る。
+  - 店舗が **0 件**のときは入力欄を出さず「店舗を作成してください」の文言と**施設（店舗）管理画面へのリンク**を
+    表示し、請求は作成できない。
+  - サーバは `shopId` を自社店舗として解決し、`cancellations.externalShopId` に紐づけたうえで、作成時点の
+    **店舗名・住所をスナップショット**（`shop_name` / `shop_address`）として保存する。
+  - 旧形式（`shopName` フリーテキストのみ）のリクエストは **400 で拒否**（即時撤去・後方互換なし）。
 - 取り込み: `cancel-billing-service-api/src/services/salonboard-import.service.ts` が「送信前（`pre_send`）」で作成。
   取り込み時点では顧客通知を送らない。
 - 保存先: **Aurora PostgreSQL `cancellations` テーブル**（drizzle。旧 DynamoDB は移行元のみ・ランタイム不参照）。
@@ -50,6 +57,12 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 - 手動作成は作成時に同経路で送信する（`invoice.service.ts` の createInvoice）。
 - Stripe Checkout Session を作成し、顧客にメール (SES) / SMS (Twilio) で決済リンクを送信。
   通知チャネルは顧客連絡先有無で決定（メール優先、無ければ SMS）。送信後ステータスは請求中(`pending`)。
+- **送信時の店舗名／住所（SMS／メール本文・Stripe 明細）**: 次の順で解決する（GTSS-817 #27）:
+  1. `cancellation.shop_name` / `shop_address`（手動作成時のスナップショット）
+  2. `externalShopId` から解決した店舗（取り込み請求はここで発生店舗名になる）
+  3. 会社名（`partnerName` / `businessName`。**住所は会社名フォールバックなし**＝住所が無ければ住所は空）
+  これにより手動・取り込みの双方で、本文に出るのが会社名ではなく**発生店舗名**になる（取り込み請求も従来の
+  会社名表記から発生店舗名へ変わる＝意図的な変更）。
 
 ### 3. 顧客による決済
 
@@ -71,9 +84,11 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 - `customerName` / `customerNameKana` / `customerEmail` / `customerPhone`（顧客 PII。退会時マスク）
 - `amount`（キャンセル料）/ `appointmentAmount`（予約金額）/ `paidAmount` / `platformFee` / `stripeFee`
 - `appointmentDate` / `startTime` / `menuName` / `staffName`
-- 取り込み（GTSS-817）: `source` / `externalShopId`(FK→external_shops) / `externalReservationId` /
+- 発生店舗: `externalShopId`(FK→`shops.id`、当サービスの店舗マスタ。店舗削除時は ON DELETE SET NULL) /
+  `shopName` / `shopAddress`（作成時点のスナップショット。店舗が消えても本文・一覧の店舗名を保全）
+- 取り込み（GTSS-817）: `source` / `externalReservationId` /
   `reservationStatus` / `cancellationType` / `paymentType` / `cancellationPolicy` / `receivedAt`
-- 冪等キー: `(externalShopId, externalReservationId)` 部分ユニーク（手動作成は両 NULL で対象外）
+- 冪等キー: `(externalShopId, externalReservationId)` 部分ユニーク（手動作成は `externalReservationId` NULL で対象外）
 
 ## 関連コード
 
@@ -83,7 +98,8 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 | `cancel-billing-service-api/src/services/cancellation.service.ts` | 一覧・手動取り込み・ログ取得 |
 | `cancel-billing-service-api/src/services/cancellation-send.service.ts` | 送信アクション（運営/サロン） |
 | `cancel-billing-service-api/src/services/salonboard-import.service.ts` | サロンボード取り込み中核 |
-| `cancel-billing-service-api/src/services/invoice.service.ts` | 手動作成・支払いリダイレクト |
-| `cancel-billing-service-admin/src/components/CancellationManagement.tsx` | 管理画面一覧・取り込み・送信 |
-| `cancel-billing-service/src/components/InvoiceList.tsx` | サロン向け一覧・送信 |
+| `cancel-billing-service-api/src/services/invoice.service.ts` | 手動作成（shopId 解決＋店舗名/住所スナップショット）・支払いリダイレクト |
+| `cancel-billing-service-admin/src/components/CancellationManagement.tsx` | 管理画面一覧・取り込み・送信・**店舗 select** |
+| `cancel-billing-service/src/components/InvoiceForm.tsx` / `InvoiceList.tsx` | サロン向け作成（店舗 select）・一覧・送信 |
+| サロンポータル施設（店舗）管理 + `GET/POST/PUT/DELETE /shops` | サロン本人の連携なし店舗 CRUD（店舗 0 件時の導線。`docs/product/salonboard-import.md` 参照） |
 | `cancel-billing-service-lp/src/components/PaymentSuccess.jsx` / `PaymentCancel.jsx` | 決済結果画面 |
