@@ -5,6 +5,20 @@ description: Playwright end-to-end testing best practices and conventions. Use t
 
 # Playwright Best Practices
 
+## E2E の実行範囲（対象リポジトリ）
+
+**「e2e が全て green か」を確認するときは、API だけでなく以下のフロントエンドアプリの e2e も必ず含める。**
+
+| リポジトリ | e2e 種別 | 実行コマンド | 備考 |
+|-----------|---------|------------|------|
+| `cancel-billing-service-api` | Vitest（Hono `app.request()` インプロセス E2E） | `npm run db:test:up && npm run test:e2e; npm run db:test:down` | `src/__tests__/e2e`。テスト用 Postgres（docker）が必要 |
+| `cancel-billing-service` | Playwright | `npm run test:e2e` | `webServer` が Vite dev を自動起動。API は `page.route` で mock（実 API 不要） |
+| `cancel-billing-service-admin` | Playwright | `npm run test:e2e` | 同上 |
+| `cancel-billing-service-lp` | （e2e なし） | `npm test`（Vitest unit のみ） | Playwright 未導入。e2e を追加したらこの表へ追記する |
+
+- フロントエンドの Playwright は `webServer` + `reuseExistingServer`（ローカル）で dev サーバを自動起動するため、手動で dev を立てなくてよい（worktree で手動起動したい場合の手順は [execution.md](./execution.md)）。
+- フロントエンドの e2e は実 API を呼ばず `page.route` で mock するため、API を起動しなくても green になる。
+
 ## 最重要ルール（MUST ALWAYS FOLLOW）
 
 以下のルールは E2E テスト作成・修正時に**必ず**遵守すること。違反したテストはレビューで差し戻す。

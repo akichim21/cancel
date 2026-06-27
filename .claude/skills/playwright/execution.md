@@ -109,19 +109,23 @@ rm -rf test-results/
 
 ## npm scripts
 
+> e2e の対象リポジトリと実行コマンドの一覧は [SKILL.md の「E2E の実行範囲」](./SKILL.md) を参照。
+
 ### cancel-billing-service-api
 | スクリプト | 説明 |
 |-----------|------|
-| `npm run dev` | ローカル Express サーバー起動 |
-| `npm test` | Jest（Unit + ハンドラ統合テスト = e2e 相当） |
+| `npm run dev` | ローカル開発サーバー起動 |
+| `npm run test:e2e` | Vitest（Hono `app.request()` インプロセス E2E、`src/__tests__/e2e`）。事前に `npm run db:test:up`、後始末に `npm run db:test:down` |
+| `npm test` | テスト用 Postgres を up → 全 Vitest 実行 → down（unit + e2e） |
 
-### フロントエンド (cancel-billing-service / -admin / -lp)
+### フロントエンド (cancel-billing-service / -admin)
 | スクリプト | 説明 |
 |-----------|------|
 | `npm run dev` | Vite dev サーバー起動 |
-| `npm run e2e` | Playwright 実行（`playwright test`） |
-| `npm run e2e:debug` | Playwright Inspector で対話的デバッグ |
-| `npm run e2e:report` | 直近の HTML レポートを表示 |
+| `npm run test:e2e` | Playwright 実行（`playwright test`）。`webServer` が dev を自動起動 |
+| `npm run test:e2e:ui` | Playwright UI モードで対話的に実行 |
+
+> `cancel-billing-service-lp` は Playwright 未導入（e2e なし）。テストは `npm test`（Vitest unit）のみ。
 
 ## 実行フロー早見表
 
