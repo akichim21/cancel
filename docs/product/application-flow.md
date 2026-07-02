@@ -92,6 +92,9 @@ LP申込で入力ミス・他人のメールアドレスでの申込を弾くた
   - `true` → ユーザーポータルへ誘導（ステータス `利用中`）
   - `false` → 未完了画面（再オンボーディングリンク `/stripe-refresh`）
 - リンク失効時: `cancel-billing-service-lp/src/components/StripeRefresh.jsx` から再発行
+- 入金（payout）は **manual + 月次末日バッチ**（GTSS-854 / #33）。連結アカウント残高（net）が
+  しきい値（`available ≧ ¥3,000` ≒ 回収 gross ¥4,000）に達した月にまとめて入金し、未達は翌月へ繰り越す。
+  着金は標準遅延（JP は Instant 非対応・最短 4 営業日）。詳細は `docs/tech/stripe-connect.md`「入金（payout）」。
 
 ### 4. ユーザーポータル ログイン
 
