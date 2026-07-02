@@ -70,16 +70,30 @@ Stripe 既定の自動入金を止め、**入金を `manual` にして月次バ�
   対象は `applications`（`stripeAccountId` あり・`active`・未削除）。`src/batch.ts` の action
   `run-monthly-payouts`（当分岐でのみ `initClients()`）から呼ぶ。実行基盤（当月末日 cron・Asia/Tokyo）は
   外部 Terraform `cancel-billing-service-infra`（EventBridge Scheduler `cron(m h L * ? *)`）が管理する。
-- **冪等性**: `idempotencyKey = payout_${stripeAccountId}_${period}`（`period`=締め年月 `YYYY-MM`）＋
-  `payout_runs (stripe_account_id, period)` ユニークで二重入金・二重記録を防ぐ。同一 period に既に
-  `pending`/`paid` があればスキップ。
+  `dryRun=true` は判定のみ（`payouts.create`・`payout_runs` 記録・レポート送信をしない）。
+- **記録整合性（claim → create → finalize）**: payout 作成は 2 段階。`payoutRunsRepo.claim` が
+  `(stripe_account_id, period)` 行を `processing` として原子的に確保し、**確保できた実行だけ**が
+  `payouts.create` を呼ぶ。成功後 `finalize` が `processing` を `pending`（＋payout ID）へ確定する。
+  これにより Scheduler リトライ×手動実行の同時実行でも二重 payout・後勝ち上書きが起きない。
+- **冪等性 / 再実行**: `idempotencyKey = payout_${stripeAccountId}_${period}_${attempt}`（`period`=締め年月 `YYYY-MM`、
+  `attempt`=`payout_runs.attempt`）＋ `payout_runs (stripe_account_id, period)` ユニークで二重入金・二重記録を防ぐ。
+  同一 period に既に `pending`/`paid` があればスキップ。`failed` 後の同一 period 手動再実行は `claim` で
+  `attempt` が +1 されるため **新しい idempotencyKey** になり Stripe に新規リクエストとして受理される
+  （固定 key だと 24h は保存済みエラー再生／`idempotency_error` で成功しなかった）。
 - **失敗ハンドリング**: アカウント単位 try/catch で 1 件の失敗が他を止めない。`payouts.create` の残高不足は
   `StripeInvalidRequestError` / `code:'balance_insufficient'` / HTTP 400 として捕捉し `failed` 記録・後続継続
-  （残高が乗る次回バッチで再試行）。
+  （残高が乗る次回バッチ、または手動再実行で attempt を上げて再試行）。
 - **突合**: 手動入金は作成時「未着金」。`payout.paid` / `payout.failed`（Connect Webhook, `event.account` 付き）で
-  `payout_runs` を `stripe_payout_id` から更新する。`payout.failed` は運営（`PAYOUT_NOTIFY_RECIPIENTS`）へ通知。
+  `payout_runs` を `stripe_payout_id` から更新する。DB 更新が障害で失敗した場合は **500 を返して Stripe に
+  再配信させる**（`checkout.session.completed` 前例に統一。200 で握ると `pending` のまま固定化するため）。
+  `payout.failed` は `failed` へ**遷移した時のみ**運営（`PAYOUT_NOTIFY_RECIPIENTS`）へ通知する（重複配信で
+  既に `failed` なら再送しない）。
 - **90 日保留は Stripe 任せ**: manual 保留は JP で最大 90 日。超過分は Stripe が自動で強制出金する。バッチは毎回
   その時点の `available` を払い出す自己突合設計のため二重払いは起きない（最終入金日管理・滞留アラートは実装しない）。
+- **退会サロンの残高**: 退会（GTSS-20: `status='withdrawn'` + `deletedAt`）は上記の対象条件（`active`・未削除）で
+  バッチ対象外になる。退会サロンに残った連結アカウント残高は**しきい値ゲート適用外**で、上記「90 日保留は
+  Stripe 任せ」により最大 90 日で Stripe が自動強制出金するため恒久的な取り残しは生じない（退会時に即精算したい
+  場合は退会フローへの残高精算＝手動 payout 追加を別 Issue 化する）。
 - **着金日はピン留め不可**: JP は Instant Payout 非対応（`available_payout_methods:["standard"]`）。`payouts.create` の
   実行日と着金日（`arrival_date`）は一致せず、土日祝で翌営業日にずれる。
 - **実行レポート**: 実行後、対象サロン別の記録（サロン名・連結アカウントID・`available`・判定結果・入金額・payout ID・
@@ -89,8 +103,10 @@ Stripe 既定の自動入金を止め、**入金を `manual` にして月次バ�
 - **サロン自己変更の不可化**: プラットフォーム設定（Connect 入金スケジュール）で「連結アカウントによる管理」を
   無効化しておく（運営作業・コード対象外）。有効なままだとサロンが自動入金へ戻せて本方式が破綻する。
 - **テーブル**: `payout_runs`（`id / application_id / stripe_account_id / period / amount / currency /
-  stripe_payout_id / status(held\|pending\|paid\|failed\|skipped) / failure_reason / created_at / updated_at`、
-  `(stripe_account_id, period)` ユニーク。migration `0018_gtss854_payout_runs`）。
+  stripe_payout_id / status(held\|processing\|pending\|paid\|failed\|skipped) / failure_reason / attempt /
+  created_at / updated_at`、`(stripe_account_id, period)` ユニーク。`application_id` FK は金銭監査記録のため
+  **ON DELETE RESTRICT**（applications の物理削除で連鎖消滅させない）。migration `0018_gtss854_payout_runs`
+  ＋ `0019_gtss854_payout_runs_attempt`）。`processing` は claim 中の一時状態、`attempt` は再実行の試行識別子。
 
 ## テスト
 
