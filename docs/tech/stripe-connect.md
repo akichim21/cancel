@@ -53,7 +53,7 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
 3. 顧客に Checkout URL をメール/SMS 送信
 4. 顧客が決済 → `checkout.session.completed` Webhook で完了処理
 
-## 入金（payout）— manual + 月次バッチ + しきい値ゲート（GTSS-854 / #33）
+## 入金（payout）— manual + 日次バッチ + しきい値ゲート + 期限前強制スイープ（GTSS-854 / #33・#34）
 
 低稼働サロンで固定 Stripe 手数料（アクティブアカウント料 ¥200/店・入金手数料 ¥250/回, 各＋税）が
 GTSS の application_fee 収入（≒回収額の 21%）を上回り、プラットフォーム残高がマイナス化する問題を緩和する。
@@ -64,12 +64,14 @@ Stripe 既定の自動入金を止め、**入金を `manual` にして月次バ�
   **net（≒回収 gross の 75%）** が連結アカウント残高に積まれ、これが payout 対象になる。
 - **しきい値ゲート**: `stripe.balance.retrieve({ stripeAccount })` の **`available`（JPY, net）が
   `PAYOUT_THRESHOLD_JPY = ¥3,000`（回収 gross 約 ¥4,000 相当）以上のときだけ**入金する。未達は保留（`held`）し
-  残高に残る＝翌月以降へ**自然に繰り越す**。判定・入金額は Stripe の `available` のみで決める（DB 集計は使わない。
-  保留中/返金引当で DB とずれるため）。Stripe「最低残高（minimum balance）」機能は「超過分だけ入金」する逆挙動のため代替不可。
+  残高に残る＝翌日以降へ**自然に繰り越す**（ただし期限到達分は下記「期限前強制スイープ」で払い出す）。判定・入金額は
+  Stripe の `available` のみで決める（DB 集計は使わない。保留中/返金引当で DB とずれるため）。Stripe「最低残高
+  （minimum balance）」機能は「超過分だけ入金」する逆挙動のため代替不可。
 - **バッチ**: `src/services/payout.service.ts` の `runMonthlyPayouts({ now, dryRun?, applicationId? })`。
-  対象は `applications`（`stripeAccountId` あり・`active`・未削除）。`src/batch.ts` の action
-  `run-monthly-payouts`（当分岐でのみ `initClients()`）から呼ぶ。実行基盤（当月末日 cron・Asia/Tokyo）は
-  外部 Terraform `cancel-billing-service-infra`（EventBridge Scheduler `cron(m h L * ? *)`）が管理する。
+  対象は `applications`（`stripeAccountId` あり・`active`・未削除）＋**退会サロン**（`withdrawn`+`deletedAt`、
+  期限強制スイープ(b)のみ）。`src/batch.ts` の action `run-monthly-payouts`（当分岐でのみ `initClients()`）から
+  呼ぶ。実行基盤は外部 Terraform `cancel-billing-service-infra`（EventBridge Scheduler）が管理し、期限判定を
+  取りこぼさないよう **日次 cron**（Asia/Tokyo）で実行する（#34 で月末 cron から変更）。
   `dryRun=true` は判定のみ（`payouts.create`・`payout_runs` 記録・レポート送信をしない）。
 - **記録整合性（claim → create → finalize）**: payout 作成は 2 段階。`payoutRunsRepo.claim` が
   `(stripe_account_id, period)` 行を `processing` として原子的に確保し、**確保できた実行だけ**が
@@ -88,11 +90,30 @@ Stripe 既定の自動入金を止め、**入金を `manual` にして月次バ�
   再配信させる**（`checkout.session.completed` 前例に統一。200 で握ると `pending` のまま固定化するため）。
   `payout.failed` は `failed` へ**遷移した時のみ**運営（`PAYOUT_NOTIFY_RECIPIENTS`）へ通知する（重複配信で
   既に `failed` なら再送しない）。
-- **90 日保留は Stripe 任せ**: manual 保留は JP で最大 90 日。超過分は Stripe が自動で強制出金する。バッチは毎回
-  その時点の `available` を払い出す自己突合設計のため二重払いは起きない（最終入金日管理・滞留アラートは実装しない）。
-- **退会サロンの残高**: 退会（GTSS-20: `status='withdrawn'` + `deletedAt`）は上記の対象条件（`active`・未削除）で
-  バッチ対象外になる。退会サロンに残った連結アカウント残高は**しきい値ゲート適用外**で、上記「90 日保留は
-  Stripe 任せ」により最大 90 日で Stripe が自動強制出金するため恒久的な取り残しは生じない（退会時に即精算したい
+- **期限前強制スイープは GTSS 側で行う（GTSS-854 差分 / #34。「Stripe 任せ」は撤回）**: JP の manual 保留は
+  最大 90 日だが、**Stripe が 90 日で自動強制出金することは保証されない**（`balance_transactions?payout=` /
+  balance report `automatic_payout_id` は auto payout 専用で manual を突合できない）。しきい値未達のまま滞留した
+  残高は 90 日規制（顧客から受領した資金を長期に保持しない）に違反し得るため、**バッチが期限前に全額を強制
+  スイープする**。判定は `available > 0` かつ **(a) `available >= しきい値` または (b) 最古未払い決済が
+  `FORCE_PAYOUT_AGE_DAYS = 75 日` 経過**（`90 − 日次実行間隔 1 − バッファ`）。(a)(b) いずれも満たさなければ保留。
+  - **最古未払い決済日（`oldestUnpaidChargeAt`）**: manual payout は「決済→payout」を紐付ける API が無いため、
+    **常に available 全額を払い出す不変条件**（部分 payout 禁止）を使い、直近スイープ時刻 `lastPayoutAt`
+    （`payout_runs` の直近 `pending`/`paid` 行の `created_at`）より **`available_on` が後の決済だけが未払い**と
+    みなす。`balanceTransactions.list`（`created > lastPayoutAt − PAYOUT_LOOKBACK_BUFFER_DAYS(14日)`）を
+    auto-paging し、`available_on > lastPayoutAt` の `charge`/`payment` の `min(created)` を最古未払い日とする
+    （返金・dispute は決済ではないため `min(created)` に影響しない＝金額のみ）。未払いが無ければ判定不要。
+  - **部分 payout 禁止**: 入金額は常に `available` 全額（金額指定の部分 payout はしない）。上記不変条件の前提。
+  - **cutover（自動入金→manual 切替時）**: 各連結アカウントで 1 回 full sweep して available を 0 にし、その
+    `payout_runs` 行が `lastPayoutAt` の基点となる。これにより切替前の決済は「払い出し済み」とみなされ、
+    `available_on > lastPayoutAt` 判定が切替以降で正しく成立する。
+  - **実行頻度 / レポート間引き**: 期限を追い越さないよう **日次 cron**（外部 Terraform `cancel-billing-service-infra`
+    の EventBridge Scheduler）で実行する。`(stripe_account_id, period='YYYY-MM')` 一意は維持（スイープ後は最古
+    未払い資金が数日齢にリセットされ同一暦月に2回目の強制入金は起きないため、日次でも「アカウント×月＝最大1入金」）。
+    日次のノイズ抑制のため、レポートは **入金/失敗が 1 件以上発生した実行のみ**送信する（no-op 日は送らない）。
+- **退会サロンの残高**: 退会（GTSS-20: `status='withdrawn'` + `deletedAt`）は通常対象条件（`active`・未削除）から
+  外れるが、**期限強制スイープ(b)の対象に含める**（`applicationsRepo.findWithdrawnWithStripeAccount` で別途列挙。
+  退会マスクは `stripe_account_id` を保持する）。退会サロンには**しきい値ゲート(a)を適用しない**（繰り越す意味が
+  ないため、期限到達(b)で確実に払い出す）。これにより退会後の残高が恒久的に取り残されない（退会時に即精算したい
   場合は退会フローへの残高精算＝手動 payout 追加を別 Issue 化する）。
 - **着金日はピン留め不可**: JP は Instant Payout 非対応（`available_payout_methods:["standard"]`）。`payouts.create` の
   実行日と着金日（`arrival_date`）は一致せず、土日祝で翌営業日にずれる。
