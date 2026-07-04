@@ -69,23 +69,29 @@ GitHub Issueベースの実装作業時は、GitHub Issueコメントとして�
 
 ## AWS 環境
 
-- AWS プロファイル: `cancel-billing-service-prod`（dev/prod 共通）
+- AWS プロファイル（**dev/prod は別アカウント**。GTSS-13 で dev 資源を dev アカウントへ移設）:
+  dev=`cancel-billing-service-dev`（818059182115）/ prod=`cancel-billing-service-prod`（145887419870）
 - リージョン: `ap-northeast-1`
-- Lambda関数名: `cancel-billing-service-dev` / `cancel-billing-service-prod`
+- Lambda関数名: `cancel-billing-service-{dev,prod}`（HTTP API）/ `cancel-billing-service-batch-{dev,prod}`（バッチ）
 
-| サブリポジトリ | dev S3 | prod S3 | dev CloudFront | prod CloudFront |
+| サブリポジトリ | dev S3（dev acct 818059182115）| prod S3 | dev CloudFront | prod CloudFront |
 |---|---|---|---|---|
-| cancel-billing-service-lp | `cancel-billing-lp-dev-145887419870` | `cancel-billing-lp-prod-app` | `E1OUC1XEZOT7LN` | `E3AU8H3BJJK35A` |
-| cancel-billing-service (user portal) | `cancel-billing-user-web-dev-145887419870` | `cancel-billing-user-portal-prod-app` | `E71P95BIB50NW` | `EKU0PRCYVJUIZ` |
-| cancel-billing-service-admin | `cancel-billing-admin-dev-145887419870` | `cancel-billing-admin-prod-app` | `E15K6M6VG5BSZ8` | `EZ2JYIS8UOYRB` |
+| cancel-billing-service-lp | `cancel-billing-lp-dev-818059182115` | `cancel-billing-lp-prod-app` | `E3DBTIIV5TB3IP` | `E3AU8H3BJJK35A` |
+| cancel-billing-service (user portal) | `cancel-billing-user-web-dev-818059182115` | `cancel-billing-user-portal-prod-app` | `E3UO0Z1W80IDPV` | `EKU0PRCYVJUIZ` |
+| cancel-billing-service-admin | `cancel-billing-admin-dev-818059182115` | `cancel-billing-admin-prod-app` | `E1V9B22113545B` | `EZ2JYIS8UOYRB` |
 
 ## デプロイ
 
-各サブリポジトリの `deploy*.sh` を使う。**`prod` は確認プロンプトが出るため一度立ち止まる。**
+**通常デプロイは CI/CD**（`develop`/`main` への push で GitHub Actions → CodeBuild が自動実行）。
+`develop`→dev アカウント / `main`→prod アカウント（`prod` は GitHub Environment の承認ゲートあり）。
+成否は Slack 通知。全体像は `docs/tech/ci-cd.md`、秘密情報の SSM 直 push は `docs/tech/secrets-management.md`。
+
+以下の `deploy*.sh` 手元実行は**緊急時・検証用のフォールバック**（`CI=true` で CI モード動作）:
 
 ```bash
-# API (Lambda)
-cd cancel-billing-service-api && ./deploy-api.sh dev   # / prod
+# API（統合: migrate → API Lambda → batch Lambda を一括実行）
+cd cancel-billing-service-api && ./deploy.sh dev       # / prod
+#   個別: ./deploy-api.sh dev / ./deploy-batch.sh dev（単独時は migrate:<env> を自分で流す）
 
 # サロンポータル
 cd cancel-billing-service && ./deploy.sh dev           # / prod
@@ -97,7 +103,8 @@ cd cancel-billing-service-admin && ./deploy-admin.sh dev  # / prod （※スク�
 cd cancel-billing-service-lp && ./deploy.sh dev        # / prod
 ```
 
-`.claude/settings.json` で `./*.sh prod*` 系は `deny` にしている。本番デプロイは人間が手元で実行する想定。
+`.claude/settings.json` で `./*.sh prod*` 系は `deny` にしている。本番の手元デプロイは人間が実行する想定
+（通常は `main` への CI/CD 経路 + Environment 承認を使う）。
 
 ## 環境変数の置き場所
 
