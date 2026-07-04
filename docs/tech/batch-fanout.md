@@ -38,9 +38,9 @@ EventBridge Scheduler ──(action)──> coordinator（主 batch Lambda の a
 | `src/services/sqs.service.ts` | `enqueueMessages(queueUrl, bodies)`（SendMessageBatch を 10 件チャンクで送信、Failed は throw）。`@aws-sdk/client-sqs` を lazy-require。テストは `__setSqsClientForTest` で注入。 |
 | `src/services/batch-fanout.service.ts` | `processWorkerRecords(records, handlers)`。`type` でハンドラ振り分け、失敗メッセージのみ `batchItemFailures` で返す（ReportBatchItemFailures = 部分バッチ応答）。 |
 | `src/config.ts` | `resolvePayoutQueueUrl` / `resolveImportQueueUrl` / `resolvePayoutFanoutEnabled` / `resolveImportFanoutEnabled`（env 注入・default-off opt-in）。 |
-| `src/services/payout.service.ts` | `runMonthlyPayoutsCoordinator`（列挙+enqueue）/ `processPayoutMessage`（worker）/ `enumeratePayoutTargets` / `processOnePayout`（1 口座・現行 `processOne`）/ `sendPayoutReportFromDb`。 |
+| `src/services/payout.service.ts` | `runMonthlyPayoutsCoordinator`（列挙+enqueue）/ `processPayoutMessage`（worker）/ `enumeratePayoutTargets` / `processOnePayout`（1 口座・現行 `processOne`）/ `sendPayoutRunReportForRun`（run の items からレポート再生成）。 |
 | `src/services/salonboard-import.service.ts` | `runSalonboardImportCoordinator`（会社列挙+enqueue）/ `processImportMessage`（worker = 既存 `runSalonboardImport` を当該会社で呼ぶ）。 |
-| `src/repositories/payout-run-batches.repository.ts` | 入金の run 完了検知・レポート一意ガード（`payout_run_batches`）。 |
+| `src/repositories/payout-run-batches.repository.ts` / `payout-run-items.repository.ts` | 入金の run 登録・レポート一意ガード（`payout_run_batches`）と、run 単位・口座単位の判定結果（`payout_run_items`。完了検知 + レポート再生成源。冪等 upsert）。 |
 
 ## SQS: 標準 vs FIFO の選択
 
@@ -75,25 +75,26 @@ EventBridge Scheduler ──(action)──> coordinator（主 batch Lambda の a
 
 ## 月次入金の完了検知とレポート DB 再生成（REQ-2 / AC-2.2）
 
-入金レポートは、従来の in-memory `results` 配列からではなく **`payout_runs` を period 指定で読み出して DB 再生成**する。
+worker は非同期・並列に完了するため末尾でまとめて集計できない。そこで入金レポートは、従来の in-memory `results`
+配列の代わりに **`payout_run_items`（run 単位・口座単位の判定結果）** から run 完了時に再生成する。これにより
+直列版の per-run `results` と**等価**になる（暦月 period の多日累積にならない・`skipped` も per-run で正しく記録・
+SQS 重複配信でも二重計上しない）。`payout_runs`（金銭状態テーブル）は変更しない。
 
-- **判定スナップショットの永続化**: worker（`processOnePayout`）が 1 口座の判定詳細（`available` / `pending` /
-  `oldest_unpaid_charge_at` / `forced_by_age` / `forced_by_orphan` / `forced_by_truncation` / `stale_alert` /
-  `withdrawn`）を `payout_runs` に記録する（migration 0020 で列追加）。`listByPeriodForReport(period)` が
-  `applications` を join して `shopName` を付け、`buildPayoutReport` が現行と等価な本文/CSV を再生成する。
-- **完了検知（`payout_run_batches`）**: cron は日次だが period は暦月粒度のため、完了検知は **run 単位**で行う
-  （period 単位では日次の再送でカウントが壊れる）。
-  - coordinator が run ごとに `run_id` を発番し `payout_run_batches(run_id, period, expected=対象口座数)` を作成、
-    各メッセージに `runId` を載せる。
-  - 各 worker は処理後に `completed` を原子的に increment（+ 当該結果に応じて `executed` / `failed` / `stale` を加算）。
-  - `completed >= expected` に達した worker が `report_sent` を **一意ガード**（`report_sent=false` の行だけ true へ
-    確保）で確保できたときだけ、レポートを 1 回送る（多重送信防止）。
-- **間引き（no-op 日は送らない）**: 送信可否は当該 run の `executed>0 || failed>0 || stale>0` で判定する
-  （run バッチのカウンタ由来）。全口座 held/skipped の静かな run は `report_sent` を立てるだけで送信しない。
-  レポート本文は DB（全 period 分）由来、送信可否は run 由来 — の二段構えで「DB 再生成」と「no-op 間引き」を両立する。
-- **既知の受容リスク**: SQS の重複配信が完了間際に起きると `completed` が expected を先に超え、遅延 worker の行が
-  当日レポートに含まれないことが理論上ありうる（payout 自体は idempotent で二重入金しない）。翌日の DB 由来
-  レポートで反映されるため実害は限定的。厳密化が必要なら run_id 付きの distinct 完了カウントへ拡張する。
+- **run 登録（`payout_run_batches`）**: cron は日次だが period は暦月粒度のため、完了検知は **run 単位**で行う。
+  coordinator が run ごとに `run_id` を発番し `payout_run_batches(run_id, period, expected=対象口座数)` を作成、
+  各メッセージに `runId` を載せる。`report_sent` は多重送信防止の一意ガード。
+- **per-run 結果の冪等記録（`payout_run_items`）**: 各 worker は `processOnePayout` の結果（現行 `processOne` の
+  result と同一形。status held/pending/paid/failed/skipped・残高・強制理由・滞留・退会）を
+  **PK `(run_id, stripe_account_id)` で冪等 upsert** する。SQS 重複配信でも同一口座は 1 件に収束する（over-count なし）。
+- **完了検知（冪等）**: 当該 run の `payout_run_items` 件数が `expected` に達したら全 worker 完了とみなす。件数ベース
+  かつ (run_id, account) 一意のため、重複配信で「他口座の初回処理前に完了と誤検知」する穴が無い（旧カウンタ方式の
+  弱点を解消）。完了 worker が `report_sent` を確保できたときだけレポートを 1 回送る。
+- **レポート本文 + 間引き（当該 run の items 由来）**: `payout_run_items` の当該 run 分を `buildPayoutReport` へ渡し、
+  現行と等価な本文/CSV を生成する。送信可否（no-op 間引き）は同じ items から `summarizePayoutResults` で判定する
+  （入金実行 or 失敗が 1 件以上、または滞留警告あり）。全口座 held/skipped の静かな run は `report_sent` を立てるだけで送らない。
+  - **per-run 等価の要点**: 月内 2 日目以降の run では、前日入金済みの口座は当日 `skipped`（executed に非計上）として
+    その run の items に記録される。よってレポートは「当日処理分」を示し、`payout_runs` を period 全体で読む方式のような
+    「前日入金を当日レポートに累積計上」する乖離が起きない（テスト `payout-fanout.test.js` の多日ケースで検証）。
 
 ## サロンボード取り込みの粒度（REQ-3）
 
@@ -104,6 +105,11 @@ EventBridge Scheduler ──(action)──> coordinator（主 batch Lambda の a
   一切変更せず**、直列の会社ループ由来 timeout を解消する（会社間は SQS で並列、`maximum_concurrency` で BAN 回避）。
 - **集約メールは追加しない**（現状どおり会社別 `external_import_runs` 行 + CloudWatch 構造化ログで観測）→ 入金と
   異なり**完了検知バリアは不要**。
+- **失敗と DLQ**: `runSalonboardImport` は会社ループ内の例外をほぼ握って `summary(ok:false)` を返す設計のため、業務的
+  失敗（ログイン失敗・連携未設定・クロール失敗）だけでなく大半の一時失敗も `external_import_runs` へ failed 記録して
+  正常完了する（= メッセージ削除。回復は翌日の日次 cron 再実行、二重作成は予約 part-unique が防止）。したがって
+  取り込み worker で DLQ へ載るのは限られた経路（会社列挙前の致命的失敗後の可視化用 claim が投げる永続 DB 障害、
+  Lambda 自体の timeout で応答を返せず SQS が再配信するケース等）のみで、業務的失敗は DLQ に溜めない。
 - **店舗粒度化（1 店舗 = 1 メッセージ）は将来最適化として据え置く**。`external_import_runs` の running-unique が
   (applicationId, source) 単位のため、店舗粒度にすると同一会社の店舗メッセージが互いに claim を潰し合う。店舗
   粒度化には claim キーへ shop_id を含めるスキーマ変更が必要で、1 会社が 900s を超えるケースが顕在化した時に
