@@ -16,6 +16,12 @@
 - **インフラ**: `~/infra/cancel-billing-service-infra` の `modules/batch-compute`（dev/prod の `main.tf` から呼び出し）。
   apply は人手ゲート。詳細は同リポジトリ README を参照。
 
+> **SQS ファンアウト（GTSS-854-sqs）**: 月次入金（`run-monthly-payouts`）とサロンボード取り込み
+> （`salonboard-import`）は、対象を 1 件ずつ直列処理する構造による Lambda timeout を回避するため、
+> coordinator（列挙+enqueue）→ SQS → worker（1 単位処理）→ DLQ のファンアウトへ移行できる（フラグ
+> `PAYOUT_FANOUT` / `IMPORT_FANOUT` で新旧切替。既定は直列）。設計・完了検知・段階移行・ロールバックは
+> [batch-fanout.md](./batch-fanout.md) を参照。
+
 ## dispatch ペイロード
 
 batch Lambda は `event.action` で処理を振り分ける（未知 action はエラー）:
