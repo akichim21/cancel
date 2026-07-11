@@ -16,11 +16,13 @@
 - **インフラ**: `~/infra/cancel-billing-service-infra` の `modules/batch-compute`（dev/prod の `main.tf` から呼び出し）。
   apply は人手ゲート。詳細は同リポジトリ README を参照。
 
-> **SQS ファンアウト（GTSS-854-sqs）**: 月次入金（`run-monthly-payouts`）とサロンボード取り込み
-> （`salonboard-import`）は、対象を 1 件ずつ直列処理する構造による Lambda timeout を回避するため、
-> coordinator（列挙+enqueue）→ SQS → worker（1 単位処理）→ DLQ のファンアウトへ移行できる（フラグ
-> `PAYOUT_FANOUT` / `IMPORT_FANOUT` で新旧切替。既定は直列）。設計・完了検知・段階移行・ロールバックは
-> [batch-fanout.md](./batch-fanout.md) を参照。
+> **ECS(Fargate) 直列実行（GTSS-860）**: 月次入金（`run-monthly-payouts`）とサロンボード取り込み
+> （`salonboard-import`）は、対象を 1 件ずつ直列処理する構造による Lambda timeout を、**分散処理を持ち込まず**
+> **実行時間上限の無い Fargate タスクで既存の直列ループを走らせて**解消する。EventBridge Scheduler の起動先を
+> Lambda invoke → **ECS RunTask** に切り替える（`local.batch_execution="ecs"｜"lambda"` で新旧切替・ロールバック）。
+> 先行着手した SQS ファンアウト（`GTSS-854-sqs` / 親リポ #35）は分散処理の付随複雑さのため**破棄**した。
+> 設計・コンテナ構成・デプロイ/ロールバック・段階移行は [batch-fargate.md](./batch-fargate.md) を参照。
+> `purge-expired-backups` は対象外（現行 Lambda + Scheduler のまま）。
 
 ## dispatch ペイロード
 
