@@ -101,7 +101,12 @@ LP申込で入力ミス・他人のメールアドレスでの申込を弾くた
 - 入口: `https://user.cancel.co.jp/`（`cancel-billing-service`）
 - 初回ログイン: 申請メールアドレス + 初期パスワード（運営メール記載）
 - ログイン後: JWT を localStorage に保存（有効期限 24 時間）
-- 初期パスワード変更を推奨（`ChangePasswordPage.tsx`）
+- **初期パスワード変更は必須**（推奨ではない）。`application_users.must_change_password = true` の間は
+  `ProtectedRoute` が `/change-password`（`ChangePasswordPage.tsx`）へ強制遷移させ、他の保護画面には入れない
+- **変更成功後は再ログイン不要**（GTSS-852 / #43）。API が新しい JWT と更新後ユーザー情報を返し、
+  ポータルはログイン状態を保ったまま**ダッシュボードへ着地**し、上部に「パスワードを変更しました」完了バナーを
+  8 秒間表示する（×で即座に閉じられる）。ログイン後の自発的な変更では遷移せず変更画面に留まり、同じバナーを出す。
+  詳細は `docs/tech/auth.md`「パスワード操作」
 
 ## 適格請求書登録番号（T番号）の登録
 

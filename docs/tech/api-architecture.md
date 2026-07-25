@@ -117,6 +117,14 @@ GTSS-19 の論理削除を拡張する。業務挙動の概要は `docs/product/
   `cancellations.customer_name/email/phone`（`***` マスク・`default('')` 併用）/ `applications.status` /
   `application_users.must_change_password`（`default(false)`）。マスクで NULL 化する申請 PII（`email` は UNIQUE の
   ため固定文字列マスク不可）・状態シグナル列・移行で NULL があり得る `created_at`/`updated_at` 等は対象外。
+  - **例外: `application_users.created_at`**（GTSS-852 / #43 で NOT NULL 化・`0022`）。repository の
+    `toDomain` は NULL 列を落として「属性不在」を再現するため、NULL 行では login / change-password の
+    レスポンスから `createdAt` キーそのものが消え、ポータルの `User` 型（`createdAt: string` 必須）と
+    食い違う。バックフィル（`COALESCE(updated_at, user_activated_at, now())`）+ `cancellations` と同一式の
+    `DEFAULT` を付けたうえで NOT NULL 化した。
+- **`application_users.password_changed_at`**（GTSS-852 / #43・`0021`）: パスワード変更前に発行された JWT を
+  失効させるための時刻列（nullable。NULL = 変更履歴なしで従来どおり有効）。判定は `middleware/auth.ts` の
+  `isTokenStaleForUser`。詳細は `docs/tech/auth.md`。
 - **増分マイグレーション `0001`**: バックアップテーブル追加 + 上記 NOT NULL 化。`ALTER COLUMN ... SET NOT NULL` は
   既存 NULL があると失敗するため、drizzle-kit が生成しない**バックフィル UPDATE**（`customer_*`→`''` / `status`→
   `'pending'` / `must_change_password`→`false`）を生成後 SQL に**手動で前置**する。aws-data-api（dev/prod）では

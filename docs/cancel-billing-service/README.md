@@ -8,6 +8,7 @@
 - Tailwind CSS
 - React Router v7
 - 認証: JWT（Context API: `src/contexts/AuthContext.tsx`）
+- 完了バナーの表示要求: `src/contexts/FlashContext.tsx`（メモリ保持・8 秒の自動消灯タイマーを所有）
 
 ## 画面一覧
 
@@ -18,6 +19,7 @@
 | パスワードリセット | `ResetPasswordPage.tsx` | `/reset-password` |
 | パスワード変更 | `ChangePasswordPage.tsx` | `/change-password` |
 | ダッシュボード | `Dashboard.tsx` | `/` |
+| 完了バナー（共通・ヘッダ直下に1箇所） | `SuccessBanner.tsx` | —（全保護画面） |
 | キャンセル請求一覧 | `InvoiceList.tsx` | `/invoices` |
 | キャンセル請求登録 | `InvoiceForm.tsx` | `/invoices/new` |
 | アカウント設定 | `SettingsPage.tsx` | `/settings` |
@@ -25,7 +27,13 @@
 | Stripe 完了 | `StripeSuccess.tsx` | `/stripe/success` |
 | ヘッダ（共通） | `Header.tsx` | — |
 
-最終的なルーティングは `src/App.tsx` 参照。
+最終的なルーティングは `src/App.tsx` 参照。Provider のネスト順は `FlashProvider` → `AuthProvider` → `Router`
+（`AuthProvider.logout` が完了バナーの表示要求を破棄するため Flash が外側）。
+
+**パスワード変更後の遷移（GTSS-852 / #43）**: 初回変更（`mustChangePassword=true`）はログアウトせず
+ダッシュボード（`/`）へ着地し、通常変更は変更画面に留まって入力欄をクリアする。いずれも完了バナー
+「パスワードを変更しました / 新しいパスワードでそのままご利用いただけます。」を表示する。詳細は
+`docs/tech/auth.md`「パスワード操作」。
 
 ## API 通信
 
