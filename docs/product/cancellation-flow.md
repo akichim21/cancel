@@ -63,12 +63,48 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 - 手動作成は作成時に同経路で送信する（`invoice.service.ts` の createInvoice）。
 - Stripe Checkout Session を作成し、顧客にメール (SES) / SMS (Twilio) で決済リンクを送信。
   通知チャネルは顧客連絡先有無で決定（メール優先、無ければ SMS）。送信後ステータスは請求中(`pending`)。
-- **送信時の店舗名／住所（SMS／メール本文・Stripe 明細）**: 次の順で解決する（GTSS-817 #27）:
+- **送信時の店舗名／住所（SMS／メール本文・Stripe Checkout の品目説明欄）**: 次の順で解決する（GTSS-817 #27）:
   1. `cancellation.shop_name` / `shop_address`（作成時点のスナップショット。**手動・取り込み両経路で保存**）
   2. `shopId` から解決した店舗（スナップショットが空の旧データのフォールバック）
   3. 会社名（`partnerName` / `businessName`。**住所は会社名フォールバックなし**＝住所が無ければ住所は空）
   これにより手動・取り込みの双方で、本文に出るのが会社名ではなく**発生店舗名**になる（取り込み請求も従来の
   会社名表記から発生店舗名へ変わる＝意図的な変更）。
+  > この解決順が効くのは **SMS／メール本文と Checkout の品目説明欄**であり、**カード利用明細ではない**
+  > （明細は連結アカウント側に `{法人名}キャンセル料`／カナを静的設定済み）。また後述の**領収書 SUMMARY 欄は
+  > 店舗名ではなく事業者名**を出す（意図的な出し分け）。
+
+- **領収書 SUMMARY 欄の発行者名（＋適格請求書登録番号）**: 顧客が決済すると Stripe が領収書メールを自動送信する。
+  その「SUMMARY」欄（Checkout Session の `payment_intent_data.description`）には、上記の店舗名ではなく
+  **事業者名（発行者名）** を出す（GTSS-851 #44）。解決順は次のとおり:
+  1. **屋号**（`applications.business_name`）
+  2. **法人名／個人事業主名**（`applications.partner_name`）
+  3. 固定文字列『サロン』
+  > ⚠️ フィールド名と意味が直感と逆（`business_name` = 屋号 / `partner_name` = 法人名）。なお `business_name` は
+  > 現行の入力経路が無く旧移行データにしか値が入らないため、**実運用では `partner_name`（法人名）に解決**され、
+  > 領収書ヘッダ（連結アカウントの `business_profile.name`）と一致する。
+  - サロンが**適格請求書登録番号（T番号）を登録している場合のみ**、発行者名の後ろへ
+    `{発行者名}（適格請求書登録番号: {T番号}）` の形で併記する。未登録なら発行者名のみ（括弧も付かない）。
+  - T番号を併記する場合に限り、発行者名が 100 文字を超えるなら 100 文字＋`…` に切り詰めてから連結する
+    （末尾の登録番号が欠落しないための防御）。未登録時は切り詰めない。
+  - **店舗名を SUMMARY に出さない理由**: 適格請求書の発行者名は T番号 の登録事業者を指すべきで、複数店舗を持つ
+    サロンで個々の店舗名を出すと登録事業者と一致しなくなるため。
+  - 適用範囲は決済リンクを作る**2経路すべて**（ポータルの請求書発行 `invoice.service.ts` / 送信ボタン経由の
+    `cancellation-send.service.ts`）。既存の決済リンクには遡及せず、**リリース後に新規作成される分から**有効。
+  - ⚠️ Stripe の領収書メールは `receipt_email`（＝顧客メール）がある場合のみ送信される。**連絡先が電話番号のみの
+    請求（SMS 通知）では領収書メール自体が届かない**ため、この表示も届かない（現行仕様）。
+
+- **出力先ごとの対応表（混同注意）**:
+
+  | 出力先 | 出る値 | T番号 |
+  |---|---|---|
+  | 領収書メールの SUMMARY（`payment_intent_data.description`） | **事業者名**（屋号 → 法人名 → 『サロン』） | **併記する**（登録時） |
+  | 決済画面の品目説明（`product_data.description`） | 店舗名 / 住所 / 担当者名 / 予約日 | 併記する（登録時。**領収書には出ない欄**） |
+  | 顧客宛メール本文・SMS 本文 | 店舗名（snapshot → shop → 会社名） | 出さない |
+  | カード利用明細（`statement_descriptor*`） | 連結アカウントに静的設定した `{法人名}キャンセル料` / カナ | 出さない |
+  | 領収書メールのヘッダ（発行元） | 連結アカウントの `business_profile.name`（＝ `partner_name`） | 出さない |
+
+  T番号の登録手段（ユーザーポータルのアカウント設定）は `docs/product/application-flow.md`、
+  Stripe 側のどのフィールドが領収書に出るかは `docs/tech/stripe-connect.md` を参照。
 
 ### 3. 顧客による決済
 
@@ -81,7 +117,9 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
 
 ### 5. payout
 
-- Stripe Connect の destination charges でサロンの connected account へ入金。
+- キャンセル料は **direct charge**（`checkout.sessions.create(params, { stripeAccount })` ＋ `application_fee_amount`）
+  で連結アカウント（サロン）上に発生する。GTSS の手数料と Stripe 手数料を引いた net が連結アカウント残高に積まれ、
+  月次バッチの `payouts.create` でサロンへ入金される（詳細は `docs/tech/stripe-connect.md`）。
 
 ## 精算用CSVの出力（代理店コード・支払日列／支払日期間フィルタ）
 

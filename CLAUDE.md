@@ -11,7 +11,8 @@
 
 テスト構成:
 - `cancel-billing-service-api`: **Vitest** (`npm test` / `test:unit` / `test:e2e`)。Hono の `app.request()` でインプロセス E2E。詳細は `docs/tech/api-testing.md`
-- `cancel-billing-service` / `cancel-billing-service-admin` / `cancel-billing-service-lp`: 未整備（追加時は vitest 推奨）
+- `cancel-billing-service` / `cancel-billing-service-admin`: **Vitest**（`npm test` = typecheck + `vitest run`）＋ **Playwright**（`npm run test:e2e`、`e2e/*.spec.ts`）
+- `cancel-billing-service-lp`: **Vitest**（`npm test`。`src/__tests__/*.test.jsx`）。Playwright は未整備
 
 ## Issue 登録先
 
@@ -151,7 +152,7 @@ cd cancel-billing-service-lp && ./deploy.sh dev        # / prod
 
 - 基本全て自動テストを実施する。ただし、実装が難しいと判断したら、理由とともに人間がテストするで問題ない
 - エッジケースなどのパターンが多いものは可能な限り unit テスト
-- API は `Vitest` を使用（Hono `app.request()` インプロセス E2E）。フロントエンドは vitest を追加して書く（未整備）
+- API は `Vitest` を使用（Hono `app.request()` インプロセス E2E）。フロントエンドも Vitest（user portal / admin / lp）＋ Playwright（user portal / admin）が導入済み
 - テスト実行終了時には process やログファイルが可能な限り残らないようにする
 
 ## CORS

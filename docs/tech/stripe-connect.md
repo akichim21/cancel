@@ -49,9 +49,31 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
 ## 決済（キャンセル料請求）
 
 1. 管理画面でキャンセル請求登録
-2. API が Stripe Checkout Session を作成（destination charge でサロン connected account を指定）
+2. API が Stripe Checkout Session を作成（**direct charge**。`checkout.sessions.create(params, { stripeAccount })`
+   でサロンの連結アカウント上に発生させ、GTSS の取り分は `application_fee_amount` で受け取る）
 3. 顧客に Checkout URL をメール/SMS 送信
 4. 顧客が決済 → `checkout.session.completed` Webhook で完了処理
+
+### Checkout のどのフィールドがどこに出るか（GTSS-851 / #44）
+
+「T番号を品目の説明欄へ入れたのに顧客の領収書に出ない」という不具合の原因が、この対応関係の誤解だった。
+**領収書メールに出したいテキストは `payment_intent_data.description` に入れること。**
+
+| フィールド | 出る場所 | 領収書メール |
+|---|---|---|
+| `payment_intent_data.description` | 領収書の **SUMMARY 欄** | **出る** |
+| `line_items[].price_data.product_data.description` | Checkout **決済画面**の品目説明 | 出ない |
+| `line_items[].price_data.product_data.name` | 決済画面の品目名・領収書の明細行 | 出る |
+| `payment_intent_data.statement_descriptor(_suffix)` | **カード利用明細** | 出ない |
+| 連結アカウントの `business_profile.name` | 領収書の**ヘッダ（発行元）** | 出る |
+| `payment_intent_data.receipt_email` | — （**未設定だと領収書メール自体が送信されない**） | — |
+
+- direct charge のため、領収書の差出人・ブランディング・公開情報は**連結アカウント（サロン）側の設定**に従う
+  （プラットフォーム側の設定は反映されない）。適格簡易請求書の発行者がサロンである建て付けと整合する。
+- 適格請求書登録番号（T番号）は、この SUMMARY 欄に `{発行者名}（適格請求書登録番号: T…）` の形で併記する。
+  仕様は `docs/product/cancellation-flow.md`「2. 送信」を参照。
+- 税率ごとの内訳を含む**厳密な適格請求書 PDF** が必要になった場合は、Checkout の `invoice_creation` を
+  有効化する対応が別途必要（現状は未対応）。
 
 ## 入金（payout）— manual + 日次バッチ + しきい値ゲート + 期限前強制スイープ（GTSS-854 / #33・#34）
 

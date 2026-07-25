@@ -20,6 +20,7 @@
 | ダッシュボード | `Dashboard.tsx` | `/` |
 | キャンセル請求一覧 | `InvoiceList.tsx` | `/invoices` |
 | キャンセル請求登録 | `InvoiceForm.tsx` | `/invoices/new` |
+| アカウント設定 | `SettingsPage.tsx` | `/settings` |
 | Stripe 再オンボーディング | `StripeReauth.tsx` | `/stripe/reauth` |
 | Stripe 完了 | `StripeSuccess.tsx` | `/stripe/success` |
 | ヘッダ（共通） | `Header.tsx` | — |
@@ -59,12 +60,19 @@ npm run build:prod  # prod 向けビルド
 
 ## テスト
 
-未整備。**追加時は vitest を使用すること**（ルート CLAUDE.md 参照）。
-推奨セットアップ:
+**Vitest（コンポーネント単体）＋ Playwright（e2e）を導入済み**。
 
 ```bash
-npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom
+npm test            # typecheck:test（tsconfig.vitest.json）+ vitest run
+npm run test:watch  # ウォッチモード
+npm run test:coverage
+npm run test:e2e    # Playwright（e2e/ 配下）
 ```
+
+- Vitest: `src/components/__tests__/*.test.tsx`（`SettingsPage` / `InvoiceForm` / `InvoiceList` /
+  `Dashboard` / `LoginPage` / `StoreManagement` ほか）
+- Playwright: `e2e/*.spec.ts`（ログイン・請求登録・店舗管理などの画面フロー）
+- `predeploy` で `lint` と `npm test` が走るため、デプロイ前に必ずテストが実行される
 
 ## 関連ドキュメント
 
