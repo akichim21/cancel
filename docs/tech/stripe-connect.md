@@ -101,10 +101,38 @@ Stripe の判定順は次のとおりで、Customer を紐づけないと最終�
   間に合わない。→ **事前作成が必須**。
 - **メール未登録（SMS 通知のみ）でも Customer を作る**: 言語は Customer が決め、送信先は別途
   `receipt_email` / Checkout で収集したメールが決めるため、メールを持たない Customer でも日本語化は効く。
-- **Customer は請求ごとに新規作成**（再利用・DB 保存なし）。冪等キー `customer_<cancellationId>` で
-  同一請求の再試行による重複作成を防ぎ、`metadata.cancellation_id` で事後追跡する。
+- **Customer は請求ごとに新規作成**（再利用・DB 保存なし）。冪等キーは
+  **`customer_<cancellationId>_<sha256(正規化メール) 先頭8桁>`** で、同一請求・同一メールの再試行による
+  重複作成を防ぎ、`metadata.cancellation_id` で事後追跡する。**キーに請求 ID だけを使ってはいけない**:
+  冪等キーは params に追随しないため、「Checkout 失敗 → `pre_send` へ差し戻し → 顧客メールを修正 → 再送」
+  という通常の復旧手順で 24h 以内なら同一キー・異パラメータになり、Stripe が idempotency error を返す
+  （＝黙って従来言語の領収書へ劣化し、予測可能な条件で毎回 Sentry へ飛ぶ）。
+- **per-request の予算を必ず切る**: Stripe SDK の既定は `timeout` 80,000ms / `maxNetworkRetries` 2 で、
+  API Lambda の 30s を大きく超える。`createJaCustomer` は `markSentIfPreSend`（`pre_send`→`pending`）の
+  **後・catch の外**で呼ばれるため、ここで Lambda がハードタイムアウトすると `revertToPreSendIfPending` が
+  走らず「リンク無し・`status=pending`」で固着し、再送は `alreadySent` で弾かれて**復旧不能**になる。
+  領収書の言語は表示上の改善＝任意呼び出しなので、`{ timeout: 5000, maxNetworkRetries: 0 }` で見切る。
 - **失敗しても決済リンクは止めない**: `customers.create` が失敗したら Sentry へ記録して従来どおり
   `customer_email` 指定（メール無しなら無指定）で Session を作る。その決済の領収書は従来の言語になる。
+  フォールバック率は checkout ログの **`jaCustomerLinked`**（boolean）で CloudWatch から追える。
+- **Stripe へ渡すメールは trim 後の値で統一する**: `customer`（Customer の `email`）と
+  `payment_intent_data.receipt_email` の両方に正規化後の値を渡す。`receipt_email` だけ生値を渡すと
+  空白のみの入力（`'   '`）が Stripe へ素通りし、形式不正で **Checkout Session 作成ごと失敗**して
+  「決済リンク無しの請求通知」が顧客へ届く。
+- **ログに顧客メールを出さない**: checkout params を丸ごと `JSON.stringify` すると `customer_email` /
+  `receipt_email` が CloudWatch へ平文で残る。`hasReceiptEmail` のように boolean へ落とす。
+  `customers.create` の例外も同様（引数にメールを取るため `email_invalid` 等でメッセージに載り得る）で、
+  `type` / `code` / `statusCode` / `requestId` のみを出す。Sentry は `scrubEventPii` を通るが console は
+  素通りする。`checkout.session.completed` の webhook ログも `hasCustomerEmail` のみ。
+- **決済画面のメール欄は「編集不可」に変わる（判断済み・許容する）**: `customer` に有効な `email` がある
+  Customer を渡すと、Checkout のメール欄は**プリフィルされ編集不可**になる（`customer_email` には
+  この記述が無い。`customer_update` に `email` は無く編集可へ戻す手段は存在しない）。ただし領収書の
+  **送信先は `payment_intent_data.receipt_email` で固定**されるため、顧客が決済画面でメールを書き換えても
+  領収書の宛先は変わらない（変更前も同じ）。＝実害は「書き換えられない」ことだけで、送信先の挙動は不変。
+  むしろ「書き換えれば宛先が変わる」という従来の誤解を招く UI が解消される。→ Issue #42 AC-4.2 で許容。
+- **`session.customer_email` は今後常に null**: `customer` 指定に切り替えたため。収集済みのメールは
+  `session.customer_details?.email` に入る（ログへ平文で出さないこと）。請求の特定は
+  `findByStripeSessionId(session.id)` で行うため機能依存は無い。
 - 決済ページ（Checkout 画面）の `locale` は領収書メールの言語とは**別物**で、現状は未指定（`auto`）のまま。
 
 ## 入金（payout）— manual + 日次バッチ + しきい値ゲート + 期限前強制スイープ（GTSS-854 / #33・#34）
