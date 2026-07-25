@@ -66,7 +66,8 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
 | `line_items[].price_data.product_data.name` | 決済画面の品目名・領収書の明細行 | 出る |
 | `payment_intent_data.statement_descriptor(_suffix)` | **カード利用明細** | 出ない |
 | 連結アカウントの `business_profile.name` | 領収書の**ヘッダ（発行元）** | 出る |
-| `payment_intent_data.receipt_email` | — （**未設定だと領収書メール自体が送信されない**） | — |
+| `payment_intent_data.receipt_email` | 領収書メールの**送信先** | — |
+| `customer`（Customer の `preferred_locales`） | 領収書メールの**言語**（下記） | — |
 
 - direct charge のため、領収書の差出人・ブランディング・公開情報は**連結アカウント（サロン）側の設定**に従う
   （プラットフォーム側の設定は反映されない）。適格簡易請求書の発行者がサロンである建て付けと整合する。
@@ -74,6 +75,37 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
   仕様は `docs/product/cancellation-flow.md`「2. 送信」を参照。
 - 税率ごとの内訳を含む**厳密な適格請求書 PDF** が必要になった場合は、Checkout の `invoice_creation` を
   有効化する対応が別途必要（現状は未対応）。
+
+### 領収書メールの言語（GTSS-850 / #42）
+
+領収書メールのテンプレート言語（見出し・項目名）は**顧客に紐づく Customer の言語設定**で決まる。
+Stripe の判定順は次のとおりで、Customer を紐づけないと最終フォールバックまで落ちて**英語**になる。
+
+| 順位 | 条件 | 使われる言語 |
+|---|---|---|
+| 1 | Customer が紐づき `preferred_locales` あり | `preferred_locales` の言語 |
+| 2 | Customer は紐づくが locale 情報なし | ダッシュボード「顧客へのメール」の既定言語 |
+| 3 | Customer が紐づかない | 決済セッション URL を開いた**ブラウザのロケール** |
+
+そのため決済リンク生成の直前に `preferred_locales: ['ja']` の Customer を作って Checkout Session の
+`customer` へ渡す（`src/services/stripe-customer.service.ts` の `createJaCustomer`）。**将来 Checkout
+まわりを触る実装者が同じ罠を踏まないよう、以下の制約に注意すること。**
+
+- **Customer は必ず連結アカウント上に作る**: 決済は direct charge のため、`customers.create` の第 2 引数に
+  Checkout Session と**同じ `{ stripeAccount }`** を渡す。プラットフォーム側で作った Customer ID を
+  連結アカウントの Session へ渡すと `No such customer` で**決済リンク発行自体が失敗する**。
+- **`customer` と `customer_email` は排他**: 両方を指定すると Stripe がエラーを返す。`customer` へ
+  切り替える際は `customer_email` を必ず落とす。
+- **`customer_creation: 'always'` では言語指定できない**: `mode:'payment'` で Customer が作られるのは
+  決済完了時であり、`preferred_locales` を事前に指定できない。領収書は決済直後に送られるため後追い更新は
+  間に合わない。→ **事前作成が必須**。
+- **メール未登録（SMS 通知のみ）でも Customer を作る**: 言語は Customer が決め、送信先は別途
+  `receipt_email` / Checkout で収集したメールが決めるため、メールを持たない Customer でも日本語化は効く。
+- **Customer は請求ごとに新規作成**（再利用・DB 保存なし）。冪等キー `customer_<cancellationId>` で
+  同一請求の再試行による重複作成を防ぎ、`metadata.cancellation_id` で事後追跡する。
+- **失敗しても決済リンクは止めない**: `customers.create` が失敗したら Sentry へ記録して従来どおり
+  `customer_email` 指定（メール無しなら無指定）で Session を作る。その決済の領収書は従来の言語になる。
+- 決済ページ（Checkout 画面）の `locale` は領収書メールの言語とは**別物**で、現状は未指定（`auto`）のまま。
 
 ## 入金（payout）— manual + 日次バッチ + しきい値ゲート + 期限前強制スイープ（GTSS-854 / #33・#34）
 
