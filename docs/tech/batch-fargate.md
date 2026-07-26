@@ -106,14 +106,109 @@ EventBridge Scheduler ──(RunTask + task定義: action別 command)──> ECS
 
 ## 段階移行（dev 検証 → prod）
 
-dev は `batch_execution="ecs"`、prod は当面 `"lambda"`（ECS 基盤は apply で先行構築するが Scheduler は Lambda のまま）。
+**現況（2026-07-25 時点）: dev / prod とも `batch_execution="lambda"` で、定期バッチは Lambda で動いている。**
+ECS 基盤（ECR / クラスタ / タスク定義 / IAM / SG / VPC）は両環境で apply 済みだが、Scheduler は Lambda 向き。
+
+長らく ECS へ移れなかったのは `deploy-batch-ecs.sh` の `register-task-definition` が一度も成功していなかったため
+（jq 組み込み変数 `$ENV` との衝突で `environment` にシェルの全環境変数が入り `ParamValidation` になる／
+`docker build` の `--platform` 未指定で Apple Silicon の手元実行が arm64 になりタスク定義の X86_64 と不一致）。
+両方とも修正済み。**同種の再発防止として、`register` 直前に `environment` が配列であること・秘密が
+混入していないことを検証する（秘密は ECS secrets=valueFrom が正）。**
+
 dev で以下を確認してから prod を `"ecs"` へ切替える:
 
-1. スケジュールされた RunTask が Fargate タスクを起動し完走（exit 0）する
-2. サロンボード取り込みが Chromium コンテナで動く（手動 RunTask で `*-import` を起動）
-3. 月次入金が直列で完了しレポートが届く
-4. 900s を超える実行が打ち切られない
-5. ロールバック（`batch_execution="lambda"`）が効く
+1. 手動 RunTask が Fargate タスクを起動し完走（exit 0）する — ✅ 確認済み（`purge-expired-backups`。
+   ECR pull / SSM secrets の valueFrom 解決 / VPC egress / Aurora Data API の実クエリ / awslogs 配送 / 終了コード伝播）
+2. サロンボード取り込みがコンテナで動く（手動 RunTask で `*-import` を起動） — ✅ 確認済み
+   （dev で 17 店舗を直列処理し 5分18秒で exit 0。Decodo プロキシ経由の実 HTTP 通信と Aurora への
+   キャンセル 2 件登録まで到達。失敗 1 件は同一 store に対する重複・失効した連携レコードによる
+   `login_failed` で、ECS 固有ではない = Lambda でも同結果）
+
+#### ⚠️ `SALONBOARD_TRANSPORT` は手元 `.env.*` と実環境で食い違っている
+
+**dev / prod の実環境は `playwright`**（Chromium 経路）で動いている。値の供給源が経路ごとに異なる:
+
+| 供給源 | 値 | 効く経路 |
+|---|---|---|
+| CodeBuild env（`var.api_salonboard_transport` 既定） | **`playwright`** | **CI デプロイ = dev/prod の実体** |
+| 手元の `.env.development` / `.env.production` | `http` | 手元からの `deploy-*.sh` 実行時のみ |
+| `Dockerfile.batch` の `ENV` | `playwright` | 上 2 つに上書きされる |
+
+`api_salonboard_transport` の説明どおり「dev/prod は AWS 直 IP が Akamai 遮断のため playwright + DECODO
+プロキシが必要。**CI は `.env.*` を読まないため CodeBuild env で供給する**」。実際 dev/prod の batch Lambda は
+どちらも `playwright` が設定されている。`salonboard-import.md` が「既定は http」と書いているのはコード既定
+（`resolveSalonboardTransport`）の話で、**dev/prod の実運用値ではない**。
+
+**地雷**: 手元の `.env.*` が `http` のままなので、緊急時に手元から `./deploy-batch-ecs.sh prod` /
+`./deploy-batch.sh prod` を打つと **transport が playwright → http へ静かに降格する**（Akamai に遮断される
+構成へ落ちる）。実際 2026-07-25 に手元から流した dev の ECS タスク定義 `:3` がこれで `http` になった。
+手元 `.env.*` を実態（`playwright`）に合わせること。
+3. 月次入金が直列で完了しレポートが届く — ✅ 確認済み（dev で exit 0 / 26 秒。
+   `period=2026-07 targets=5 (live=4 withdrawn=1)` → `executed=0 held=3 skipped=2 failed=0`）
+4. 900s を超える実行が打ち切られない — ✅ 確認済み（`entryPoint` を `/bin/sh -c` に差し替えた検証用
+   タスク定義で `sleep 1020` を実行し **1,020.002 秒**走り切って exit 0。batch Lambda の実タイムアウトは
+   600 秒なので、Lambda 制限からの脱却を実測で確認した。検証用タスク定義は deregister 済み）
+5. ロールバック（`batch_execution="lambda"`）が効く — ✅ 確認済み（dev で実 apply。下表）
+
+#### ロールバック実測（dev / `-target=module.batch_compute -target=module.batch_fargate`）
+
+| 手順 | 結果 | Scheduler の向き先 |
+|---|---|---|
+| 初期 `batch_execution=lambda` | — | Lambda（`cancel-billing-service-batch-dev`） |
+| `apply -var batch_execution=ecs` | 3 added, 1 destroyed | ECS（`cancel-billing-batch-dev-cluster`） |
+| `apply -var batch_execution=lambda` | 1 added, 3 destroyed | Lambda（復帰） |
+
+切替・復帰とも Scheduler の作り直しのみで、タスク定義・Lambda コードには触れない。
+
+### prod 切替の手順（人間ゲート）
+
+**順序厳守。Scheduler は family（リビジョン無し）を参照して最新 ACTIVE を引くため、イメージ配備を
+cutover より先に行うこと。** 現在 prod の最新 ACTIVE は `:1` = `:bootstrap`（ECR に存在しないタグ）なので、
+先に cutover すると定期発火が ImagePull で失敗する。
+
+```bash
+# 1) イメージ配備（Scheduler は Lambda のまま = 挙動不変・完全に可逆）
+#    A. CodeBuild 経由（推奨。LINUX_CONTAINER=x86_64 でネイティブビルド）
+aws codebuild start-build --project-name cancel-batch-image-prod \
+  --profile cancel-billing-service-prod --region ap-northeast-1
+#    B. 手元から（Apple Silicon では amd64 クロスビルドのため低速）
+cd ~/cancel/cancel-billing-service-api && ./deploy-batch-ecs.sh prod
+
+# 2) 登録内容の検証（revision >= 2 / image が :bootstrap でない / 秘密が environment に無い）
+aws ecs describe-task-definition --task-definition cancel-billing-batch-prod-import \
+  --profile cancel-billing-service-prod --region ap-northeast-1 \
+  --query 'taskDefinition.{Rev:revision,Image:containerDefinitions[0].image,
+            EnvNames:containerDefinitions[0].environment[].name,
+            Secrets:containerDefinitions[0].secrets[].name}'
+
+# 3) 単発 RunTask で疎通（Scheduler 未変更なので安全。purge は冪等）
+aws ecs run-task --cluster cancel-billing-batch-prod-cluster \
+  --task-definition cancel-billing-batch-prod-import --launch-type FARGATE \
+  --network-configuration 'awsvpcConfiguration={subnets=[subnet-04973b9995473ccb4,subnet-08e264fc90a1dd828],securityGroups=[sg-071d0eb20e93ce17c],assignPublicIp=ENABLED}' \
+  --overrides '{"containerOverrides":[{"name":"batch","command":["purge-expired-backups"]}]}' \
+  --profile cancel-billing-service-prod --region ap-northeast-1
+# exit code とログ（ロググループ /ecs/cancel-billing-batch-prod）を確認する
+
+# 4) cutover
+cd ~/infra/cancel-billing-service-infra/prod
+terraform apply -var 'batch_execution=ecs'
+```
+
+`terraform plan -var 'batch_execution=ecs'` の内容（2026-07-25 実測 / **4 to add, 0 to change, 2 to destroy**）:
+
+| 操作 | リソース |
+|---|---|
+| destroy | `module.batch_compute.aws_scheduler_schedule.run_monthly_payouts[0]` |
+| destroy | `module.batch_compute.aws_scheduler_schedule.salonboard_import[0]` |
+| create | `module.batch_fargate.aws_iam_role.scheduler[0]` / `aws_iam_role_policy.scheduler[0]` |
+| create | `module.batch_fargate.aws_scheduler_schedule.this["import"]`（`cron(10 0 * * ? *)` JST） |
+| create | `module.batch_fargate.aws_scheduler_schedule.this["payouts"]`（`cron(0 6 * * ? *)` JST） |
+
+`purge-expired-backups` は `enable_purge_schedule = true` 固定のため Lambda のまま（短時間ジョブなので設計どおり）。
+新旧でスケジュール名が異なる（旧 `cancel-billing-service-batch-prod-*` / 新 `cancel-billing-batch-prod-*`）ため名前衝突は無い。
+
+**ロールバック**: `terraform apply -var 'batch_execution=lambda'` で Scheduler の起動先が Lambda invoke へ即時復帰する
+（Lambda 側のコードは `deploy-batch.sh` が配備したものが温存されている）。
 
 ## 冪等性・失敗分離・再実行
 
