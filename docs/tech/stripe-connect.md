@@ -76,6 +76,31 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
 - 税率ごとの内訳を含む**厳密な適格請求書 PDF** が必要になった場合は、Checkout の `invoice_creation` を
   有効化する対応が別途必要（現状は未対応）。
 
+#### dev では領収書メールが届かない（確認は `receipt_url` で行う）
+
+**dev で領収書メールを受け取って確認することはできない。** 理由は2つ:
+
+1. **テストモードの制約**: Stripe は、顧客のメールアドレスが「Stripe アカウントのサンドボックス権限を持つ
+   認証済みメールアドレス」に属している場合**のみ**テスト決済の領収書を自動送信する（[docs](https://docs.stripe.com/receipts)）。
+   dev の顧客メールは通常この条件を満たさない。
+2. **direct charge**: 領収書のメール設定は**連結アカウント側**に従うため、プラットフォーム側で
+   「支払い成功時のメール」を有効化しても効かない。
+
+代わりに **`charge.receipt_url`（ホスト型領収書ページ）** を開いて実表示を確認する。メール送信の可否と
+無関係に必ず生成され、`Receipt From` / `Amount Paid` / `Date Paid` / `Payment Method` / **`Summary`** の
+セクションを持つ（SUMMARY 欄の実表示・折り返しをそのまま目視できる）。
+
+```bash
+cd cancel-billing-service-api
+npm run receipt:url:dev -- <cancellationId>                       # DB から session/連結アカウントを解決
+npm run receipt:url:dev -- --session cs_xxx --account acct_xxx    # 直接指定
+```
+
+- 実装: `scripts/print-receipt-url.ts`。charge は連結アカウント上にあるため `{ stripeAccount }` の指定が必須。
+- **`receipt_url` へのリンクは 30 日で失効する**（領収書自体は失効しない）。確認は決済直後に行うこと。
+- メール本文の体裁そのものを確認したい場合は、Dashboard の 取引 > 支払い > 領収書の履歴 > ⋯ > 領収書を送信
+  から任意アドレスへ手動送信する。
+
 ### 領収書メールの言語（GTSS-850 / #42）
 
 領収書メールのテンプレート言語（見出し・項目名）は**顧客に紐づく Customer の言語設定**で決まる。
