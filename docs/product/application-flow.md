@@ -53,11 +53,29 @@ admin は `src/constants/applicationStatus.ts` に別定義）。保存先は **
     applicationId・作成日時は維持。application_users は email 一意制約のため**再利用**＝新規作成しない）。
   - 既存が `unverified` 以外（`pending`/`approved`/`onboarding`/`active`）→ 従来どおり **409 `DUPLICATE_EMAIL`**。
   - 論理削除済み（`withdrawn`）は email がマスク（NULL）され重複判定に一致しないため、同一 email で新規申込可。
+- **送信結果の画面挙動**（GTSS-883 / #51）:
+  - **送信成功**（新規 201・未認証再申込の上書き＋再送 201 のいずれも）→ フォーム入力値をクリアしてから
+    **認証メール送信のご案内ページ `/verify-email-sent` へ通常遷移**（`window.location.assign` による
+    full page load。本番ビルドで注入される GTM が標準 Page View として検知できる）。
+    旧挙動の成功時ブラウザ標準ダイアログ（alert）とフォーム直下の成功カードは廃止。
+  - **409 `DUPLICATE_EMAIL`**（認証済み以降の重複）→ 遷移せず、従来どおり同一ページで
+    「すでに申請済みです」を案内（alert＋フォーム直下カード。認証メールが送られないケースのため）。
+  - **バリデーション NG・その他エラー・ネットワークエラー** → 遷移せず、従来どおり同一ページで表示。
 
 ### 1.5 メール認証（GTSS-842 / #31）
 
 LP申込で入力ミス・他人のメールアドレスでの申込を弾くため、申込直後にメールアドレスの本人認証を挟む。
 
+- **認証メール送信のご案内ページ**（`/verify-email-sent`、`cancel-billing-service-lp/src/components/VerifyEmailSent.jsx`。
+  GTSS-883 / #51）: 申込送信成功時の遷移先。認証メールを送った旨・メール内リンクを押すと認証が完了すること・
+  この後の流れ（①メール内リンクで認証（お客さまの操作）→②弊社で審査→③審査通過後に Stripe登録のご案内）・
+  届かない場合は迷惑メールフォルダの確認、を表示し、トップページへ戻る導線を持つ。
+  - 位置づけは「申込完了」ではなく**次の操作（メール認証）の依頼**。完了を意味する文言（「受け付けました」等）は
+    使わない（完了の案内は認証完了画面側の役割）。申請ID・入力情報は表示せず、URL は固定パス
+    （クエリ・ハッシュに個人情報・申請ID・代理店コードを含めない）。
+  - 表示専用でサーバー通信を行わない（直接アクセス・再読み込みでも二重登録は起きない）。
+  - **noindex はこのページの表示中のみ**動的に `meta[name="robots"]`（`noindex, nofollow`）を挿入して適用
+    （LP は全ルートが同一 HTML を共有する SPA のため、LP 本体・既存ページへ波及させない）。
 - **認証メール**（申込者宛）: 宛名（事業者名）＋認証URL（`{LPベースURL}/verify-email?token=...`）＋
   有効期限（24時間）の案内。送信は本番=SMTP / それ以外=SES、送信元 `info@cancel.co.jp`。
 - **認証画面**（`/verify-email`、`cancel-billing-service-lp/src/components/EmailVerify.jsx`）: URL の `token` を
@@ -216,7 +234,9 @@ Tx 外・best-effort）。既に削除済みの申請を再削除しても**冪�
 
 | ファイル | 役割 |
 |---|---|
-| `cancel-billing-service-lp/src/App.jsx` | LP 申請フォーム・独自ルーティング（`/verify-email` 含む） |
+| `cancel-billing-service-lp/src/App.jsx` | LP 申請フォーム・独自ルーティング（`/verify-email` / `/verify-email-sent` 含む） |
+| `cancel-billing-service-lp/src/components/VerifyEmailSent.jsx` | 認証メール送信のご案内ページ（申込送信成功時の遷移先・noindex 動的適用。GTSS-883） |
+| `cancel-billing-service-lp/src/utils/navigation.js` | 送信成功時の遷移ヘルパー（`goToVerifyEmailSent`。GTSS-883） |
 | `cancel-billing-service-lp/src/components/EmailVerify.jsx` | メール認証結果画面（verified/expired/already_verified/invalid。GTSS-842） |
 | `cancel-billing-service-lp/src/components/StripeSuccess.jsx` | Stripe登録完了判定 |
 | `cancel-billing-service-lp/src/components/StripeRefresh.jsx` | Stripe リンク再発行 |
