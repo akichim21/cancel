@@ -35,7 +35,7 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 ```
 
-### Step 1.5: Codex 実行ルール（hang 防止 + セッション分離）
+### Step 1.5: Codex 実行ルール（hang 防止 + セッション分離 + サブエージェント安全な待機）
 
 `codex exec` は **prompt を引数で渡しても stdin が open だと EOF を待ち続けて hang する**
 （実際に過去 issue #3558 対応時に発生）。
@@ -46,11 +46,21 @@ fi
 2. `timeout`（または `gtimeout`）が使える場合は wall-clock 強制終了として `timeout 1200` を前置する。macOS素の環境にはどちらも入っていないため、無い場合は前置せず codex 任せで起動する（必要なら後述の `TIMEOUT_BIN` パターンを使う）
 3. `--ephemeral` でセッションファイルを永続化させない（共有環境での別セッション混入を防ぐ）
 4. `--sandbox read-only` で書き込み・任意コマンド実行を禁止する（read 系ツールのみ使わせる）
-5. **Bash ツールは `run_in_background: true` で起動する**。Bashツール前景 timeout 上限は 600000ms = 10分なので、長時間コマンドを安全に待つには background 実行が必須。完了通知を待ってから出力ファイルを読む。
+5. 起動コマンドの末尾で **完了マーカーを出力ファイルへ追記**する（`echo "codex exit: $?" >> "$OUTPUT_FILE"`）。完了判定はこのマーカーの有無だけで行う
+6. codex の起動は `run_in_background: true` で行い、**待機は必ず「同一ターン内の前景ポーリング」で行う（下記）**
 
-**絶対に `pgrep -f "codex exec"` のようなプロセス名ベース待機をしない。**
-共有環境では他ユーザー・他タスクの Codex 実行に誤反応する。
-長時間コマンドを待つ場合は、**その Bash 実行自身が返した background command ID / output file のみ**を使って待機・取得すること。
+**待機ルール（最重要 — このエージェントはサブエージェントとして動く）:**
+
+- **バックグラウンド完了通知を待つ目的でターンを終了してはならない。** サブエージェントはターンを終えた時点で「完了」となり、バックグラウンドタスクの完了では再起動されない。「通知が来たら続きをやる」と書いてターンを終えると、codex が成功していても結果は誰にも読まれず、レビュー全体が停止する（2026-07-28 PR#3940 で実際に発生した恒常障害。原因はこの待機ミスであり codex 自体は成功していた）
+- 待機は前景 Bash で行う:
+  ```bash
+  until grep -q "^codex exit:" "$OUTPUT_FILE"; do sleep 15; done; echo "codex-finished"
+  ```
+  （Bash ツールの `timeout` パラメータは最大値 600000 を指定する）
+- この前景コマンドが Bash ツールの上限でタイムアウトした場合、それは**エラーではなく「まだ実行中」の意味**。同じコマンドをそのまま再実行し、`codex-finished` が出るまで**同一ターン内で何回でも繰り返す**（繰り返し回数に上限は設けない。実質の上限は codex 側の `timeout 1200` のみ）
+- 監視用のバックグラウンドタスク（watcher）を別途起動しない
+- **絶対に `pgrep -f "codex exec"` のようなプロセス名ベース待機をしない。** 共有環境では他ユーザー・他タスクの Codex 実行に誤反応する。完了判定は自分が起動した `$OUTPUT_FILE` のマーカーのみを使う
+- このエージェントの tools は Bash と Read のみ。サブエージェント/サブスレッドの起動を試みない
 
 ### Step 2: Issue情報の展開
 
@@ -88,7 +98,7 @@ Codexには `--sandbox read-only` で書き込みを禁じ、追加調査は rea
 - 差分が3000行以下: 全文をプロンプトに埋め込む
 - 差分が3000行超: 変更ファイル一覧のみ埋め込み、Codexに `read` で個別ファイルを確認させる
 
-**実行コマンド（`run_in_background: true` で起動すること）:**
+**実行コマンド（`run_in_background: true` で起動し、直後に Step 1.5 の待機ルールどおり前景ポーリングで待つこと）:**
 
 ```bash
 DIFF_CONTENT=$(cat {diffFile})
@@ -176,7 +186,10 @@ ${TIMEOUT_BIN:+$TIMEOUT_BIN 1200} codex exec \
   -C {repoDir} \
   "$PROMPT_TEXT" \
   > "$OUTPUT_FILE" 2>&1 < /dev/null
+echo "codex exit: $?" >> "$OUTPUT_FILE"
 ```
+
+起動したら、ターンを終了せずにそのまま前景ポーリングで完了を待つ（Step 1.5 待機ルール）。
 
 **プロンプト組み立て時の置換ルール:**
 
@@ -208,8 +221,8 @@ fi
 CODEX_RESULT=$(awk "NR>=${LAST_LINE}" "$OUTPUT_FILE")
 ```
 
-`timeout` で打ち切られた場合（exit 124）は「Codex timed out」とだけ報告し、無理に再試行しない。
-`timeout` が無い環境では codex 自身の応答完了まで待つ（Bashツールは background 起動推奨）。
+`timeout` で打ち切られた場合（マーカーが `codex exit: 124`）は「Codex timed out」とだけ報告し、無理に再試行しない。
+`timeout` が無い環境でも待機方法は同じ（マーカーが現れるまで同一ターン内の前景ポーリング）。
 
 ### Step 5: Codex 出力の関連性検証
 

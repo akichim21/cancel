@@ -16,3 +16,5 @@ cancel-billing-service
 __pycache__
 .pyc
 .login.json
+.login-store.json
+.login-kirei.json

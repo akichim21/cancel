@@ -5,21 +5,37 @@
 ## 全体フロー
 
 ```
-[LP申請フォーム] → [運営審査] → [Stripe Connect登録] → [オンボーディング] → [利用開始]
-   GTSS審査中    Stripe登録待ち   オンボーディング待ち       利用中
+[LP申請フォーム] → [メール認証] → [運営審査] → [Stripe Connect登録] → [オンボーディング] → [利用開始]
+ 仮登録（未認証）    審査中(pending)  Stripe登録待ち  オンボーディング待ち       利用中
+                                       ↘ 却下済み（運営却下）／ 退会（削除）
 ```
+
+LP 申込送信直後は **仮登録（未認証）**（`unverified`）で保存し、申込者宛の**認証メール**の URL を
+タップして初めて **審査中**（`pending`）へ進む二段階フロー（GTSS-842 / #31）。詳細は後述
+「[1.5 メール認証](#15-メール認証gtss-842--31)」。
 
 ## ステータス遷移
 
-`cancel-billing-service-api/src/lambda.ts` の `APPLICATION_STATUS`:
+DB 保存値・API 契約は **英語 lowercase enum**、画面表示は **日本語ラベル**（SSoT は
+`cancel-billing-service-api/src/constants/application-enums.ts`。`src/config` / `src/lambda` から再 export。
+admin は `src/constants/applicationStatus.ts` に別定義）。保存先は **Aurora PostgreSQL**（`applications` テーブル。
+旧 DynamoDB から移行済み）。API レスポンスは `status`（英語値）+ `statusLabel`（日本語）を返す。
 
-| ステータス | 状態 | 次にやること |
-|---|---|---|
-| `GTSS審査中` | LP申請完了直後 | 運営者が管理画面で審査 |
-| `Stripe登録待ち` | 運営者が承認 | サロンに Stripe Connect リンクをメール送信 |
-| `オンボーディング待ち` | Stripe アカウント作成済み | サロンがオンボーディング（本人確認・銀行口座登録）を完了 |
-| `利用中` | `details_submitted = true` | キャンセル請求の登録が可能 |
-| `却下済み` | 運営者が却下 | 終了 |
+| enum 値（DB/API） | ラベル（statusLabel） | 状態 | 次にやること |
+|---|---|---|---|
+| `unverified` | 仮登録（未認証） | LP申込送信直後（メール未認証） | 申込者が認証メールの URL をタップ |
+| `pending` | GTSS審査中 | メール認証完了 | 運営者が管理画面で審査 |
+| `approved` | Stripe登録待ち | 運営者が承認 | サロンに Stripe Connect リンクをメール送信 |
+| `onboarding` | オンボーディング待ち | Stripe アカウント作成済み | サロンがオンボーディング（本人確認・銀行口座登録）を完了 |
+| `active` | 利用中 | `details_submitted = true` | キャンセル請求の登録が可能 |
+| `rejected` | 却下済み | 運営者が却下 | 終了 |
+| `withdrawn` | 退会 | 運営者が申請を削除（論理削除） | 終了（後述「申請の削除」） |
+
+**遷移ルールの要点（手動更新ガード）**:
+- `unverified` には **LP申込送信時のみ**到達し、`unverified → pending` は**メール認証完了のみ**が行う。
+  管理画面・API の手動ステータス更新（`PUT /applications/:id/status`）では `unverified` への/からの遷移を
+  **400 で拒否**する（未認証申込の審査アクションを UI/API の二重で塞ぐ。GTSS-842 / #31）。
+- `withdrawn` も削除操作でのみ到達する内部遷移で手動更新からは到達・離脱不可（GTSS-20。後述）。
 
 ## ステップ詳細
 
@@ -27,8 +43,53 @@
 
 - 入口: `https://cancel.co.jp/`（`cancel-billing-service-lp`）
 - フォーム: サロン名・代表者・連絡先・住所・口座希望情報 等
-- 保存先: DynamoDB `cancel-billing-applications-{env}`
-- 初期ステータス: `GTSS審査中`
+- 保存先: Aurora PostgreSQL `applications` テーブル（旧 DynamoDB から移行済み）
+- 初期ステータス: **`unverified`（仮登録（未認証））**（メール認証完了で `pending` へ）
+- 申込送信時、申請レコードに**認証トークン**（暗号学的乱数 hex）＋**有効期限（発行+24時間）**を発行し保存する。
+- 申込と同時に **ログインユーザー（application_users）を 1:1 で先行作成**（`password=NULL` / 未有効化）。
+  「申請在り = ログインユーザー在り」の不変条件を保つ（初期パスワードの発番は Stripe オンボーディング完了時）。
+- **メールアドレス重複時の挙動**（GTSS-842 / #31）:
+  - 既存が `unverified` → 既存行を**今回の入力で上書き**＋トークン再発行＋**認証メール再送**（201。
+    applicationId・作成日時は維持。application_users は email 一意制約のため**再利用**＝新規作成しない）。
+  - 既存が `unverified` 以外（`pending`/`approved`/`onboarding`/`active`）→ 従来どおり **409 `DUPLICATE_EMAIL`**。
+  - 論理削除済み（`withdrawn`）は email がマスク（NULL）され重複判定に一致しないため、同一 email で新規申込可。
+- **送信結果の画面挙動**（GTSS-883 / #51）:
+  - **送信成功**（新規 201・未認証再申込の上書き＋再送 201 のいずれも）→ フォーム入力値をクリアしてから
+    **認証メール送信のご案内ページ `/verify-email-sent` へ通常遷移**（`window.location.assign` による
+    full page load。本番ビルドで注入される GTM が標準 Page View として検知できる）。
+    旧挙動の成功時ブラウザ標準ダイアログ（alert）とフォーム直下の成功カードは廃止。
+  - **409 `DUPLICATE_EMAIL`**（認証済み以降の重複）→ 遷移せず、従来どおり同一ページで
+    「すでに申請済みです」を案内（alert＋フォーム直下カード。認証メールが送られないケースのため）。
+  - **バリデーション NG・その他エラー・ネットワークエラー** → 遷移せず、従来どおり同一ページで表示。
+
+### 1.5 メール認証（GTSS-842 / #31）
+
+LP申込で入力ミス・他人のメールアドレスでの申込を弾くため、申込直後にメールアドレスの本人認証を挟む。
+
+- **認証メール送信のご案内ページ**（`/verify-email-sent`、`cancel-billing-service-lp/src/components/VerifyEmailSent.jsx`。
+  GTSS-883 / #51）: 申込送信成功時の遷移先。認証メールを送った旨・メール内リンクを押すと認証が完了すること・
+  この後の流れ（①メール内リンクで認証（お客さまの操作）→②弊社で審査→③審査通過後に Stripe登録のご案内）・
+  届かない場合は迷惑メールフォルダの確認、を表示し、トップページへ戻る導線を持つ。
+  - 位置づけは「申込完了」ではなく**次の操作（メール認証）の依頼**。完了を意味する文言（「受け付けました」等）は
+    使わない（完了の案内は認証完了画面側の役割）。申請ID・入力情報は表示せず、URL は固定パス
+    （クエリ・ハッシュに個人情報・申請ID・代理店コードを含めない）。
+  - 表示専用でサーバー通信を行わない（直接アクセス・再読み込みでも二重登録は起きない）。
+  - **noindex はこのページのみ**に適用する（`meta[name="robots"]` = `noindex, nofollow`）。LP は全ルートが
+    同一 HTML を共有する SPA のため、LP 本体・公開ページ（利用規約／プライバシーポリシー／特商法表記）へ
+    波及させない。適用は SEO を単一管理する `cancel-billing-service-lp/src/seo.js` の `verify-email-sent`
+    エントリが担い（title も同エントリが設定）、ページコンポーネント側では head を触らない（GTSS-887 で
+    ページ別 title / description / canonical / noindex を `seo.js` へ集約したため）。
+- **認証メール**（申込者宛）: 宛名（事業者名）＋認証URL（`{LPベースURL}/verify-email?token=...`）＋
+  有効期限（24時間）の案内。送信は本番=SMTP / それ以外=SES、送信元 `info@cancel.co.jp`。
+- **認証画面**（`/verify-email`、`cancel-billing-service-lp/src/components/EmailVerify.jsx`）: URL の `token` を
+  取得し `POST /applications/verify-email` を呼び、結果種別で出し分ける:
+  - `verified`（有効期限内）→ 「認証が完了しました」＋「この後の流れ」を表示。申請を **`pending`（審査中）** へ
+    更新し、**有効期限を無効化（NULL 化）しつつトークン値は保持**（再オープン時の `already_verified` 判定用）。
+    あわせて**運営管理者へ新規申請通知メールを送信**する（未認証段階では送らない。後述「メール送信タイミング」）。
+  - `expired`（有効期限切れ）→ 「リンクの有効期限が切れています」＋申込フォームへの再申込導線（未認証は再申込で上書き＋再送）。
+  - `already_verified`（`unverified` 以外＝認証済み）→ 「すでに認証が完了しています」＋待機案内。再遷移・通知再送はしない（冪等）。
+  - `invalid`（トークン不一致・空トークン）/ 通信エラー → 無効リンク / エラー画面。
+- **認証完了画面の「この後の流れ」**: ①弊社で審査 → ②審査通過後に Stripe登録案内メール → ③Stripe登録完了で利用開始。
 
 ### 2. 運営審査
 
@@ -36,7 +97,14 @@
 - 運営者が申請内容を確認 → 承認 / 却下
 - 承認時: ステータスを `Stripe登録待ち` に更新し、サロンに Stripe Connect 用メール送信
   - メール送信: SES (ap-northeast-1)
-  - 初期パスワード（ユーザーポータルログイン用）も同時発行
+  - 初期パスワード（ユーザーポータルログイン用）の発番は Stripe オンボーディング完了（`account.updated` webhook）時
+- **未認証申込のロック**: `unverified` の申請は一覧に表示されるが審査アクション（審査通過/却下）を提示しない
+  （admin は `getAvailableStatusActions` の default `[]`、API は `updateApplicationStatus` のガードで二重防御。
+  GTSS-842 / #31）。「申し込んだのに連絡が来ない」というサロンが未認証で止まっていることを運営が把握できる。
+
+> **メール送信タイミング（GTSS-842 / #31 / REQ-7）**: 申込送信時は**申込者宛の認証メールのみ**送る。
+> 運営管理者宛の「新しい申請が届きました」通知メールは、**メール認証完了時（`pending` へ遷移した時）**に送る
+> （未認証のまま離脱した申込で管理者の受信箱にノイズが出るのを防ぐ）。
 
 ### 3. Stripe Connect オンボーディング
 
@@ -45,13 +113,56 @@
   - `true` → ユーザーポータルへ誘導（ステータス `利用中`）
   - `false` → 未完了画面（再オンボーディングリンク `/stripe-refresh`）
 - リンク失効時: `cancel-billing-service-lp/src/components/StripeRefresh.jsx` から再発行
+- 入金（payout）は **manual + 月次末日バッチ**（GTSS-854 / #33）。連結アカウント残高（net）が
+  しきい値（`available ≧ ¥3,000` ≒ 回収 gross ¥4,000）に達した月にまとめて入金し、未達は翌月へ繰り越す。
+  着金は標準遅延（JP は Instant 非対応・最短 4 営業日）。詳細は `docs/tech/stripe-connect.md`「入金（payout）」。
 
 ### 4. ユーザーポータル ログイン
 
 - 入口: `https://user.cancel.co.jp/`（`cancel-billing-service`）
 - 初回ログイン: 申請メールアドレス + 初期パスワード（運営メール記載）
 - ログイン後: JWT を localStorage に保存（有効期限 24 時間）
-- 初期パスワード変更を推奨（`ChangePasswordPage.tsx`）
+- **初期パスワード変更は必須**（推奨ではない）。`application_users.must_change_password = true` の間は
+  `ProtectedRoute` が `/change-password`（`ChangePasswordPage.tsx`）へ強制遷移させ、他の保護画面には入れない
+- **変更成功後は再ログイン不要**（GTSS-852 / #43）。API が新しい JWT と更新後ユーザー情報を返し、
+  ポータルはログイン状態を保ったまま**ダッシュボードへ着地**し、上部に「パスワードを変更しました」完了バナーを
+  8 秒間表示する（×で即座に閉じられる）。ログイン後の自発的な変更では遷移せず変更画面に留まり、同じバナーを出す。
+  詳細は `docs/tech/auth.md`「パスワード操作」
+
+## 適格請求書登録番号（T番号）の登録
+
+インボイス制度対応として、サロンが自社の**適格請求書登録番号（T番号）**を登録できる（GTSS-13 で登録機能、
+GTSS-851 / #44 で領収書への反映）。
+
+- **登録手段**: ユーザーポータルの**アカウント設定**（`/settings`・`SettingsPage.tsx`）。運営（admin）側の
+  入力画面は無く、**サロン本人が自分で登録する**。
+- **形式**: `T` + 数字13桁（例 `T1234567890123`）。未設定（空）も許容する。
+- **保存先**: `applications.t_registration_number`。**会社（申込）単位**であり店舗単位ではない
+  （複数店舗を持つサロンでも 1 つ）。
+- **顧客への反映**: 登録済みなら、顧客が決済後に受け取る **Stripe 領収書メールの SUMMARY 欄**へ
+  `{発行者名}（適格請求書登録番号: T…）` の形で発行者名と並べて表示される。加えて決済画面の品目説明欄にも
+  併記される。未登録なら発行者名のみで、括弧も付かない。仕様の詳細（発行者名の解決順・適用経路・制約）は
+  `docs/product/cancellation-flow.md`「2. 送信（決済リンク送信）」を参照。
+- **注意**: Stripe の領収書メールは顧客メールアドレスがある場合のみ送信されるため、**連絡先が電話番号のみの
+  顧客（SMS 通知）には領収書が届かず、T番号も届かない**。
+- 申請の論理削除時も T番号 は**保持**する（会計・請求履歴のため。下記「マスク対象 / 保持対象」）。
+
+## 代理店コードの記録（紹介リンク経由の申込）
+
+サロンがどの代理店（紹介リンク）経由で申し込んだかを記録する（GTSS-836 / #30）。詳細は
+`docs/product/agent-code.md`。申請フロー上の要点:
+
+- **取得（LP / first-touch）**: 申込ページが URL `?agent=xxx`（例 `?agent=topad`）を読み、**保持済みが
+  無い場合のみ** `localStorage` に保持する（最初の値を優先・上書きしない）。申込送信時、保持値が空でなければ
+  `agentCode` を申込データに含める。代理店コードはサロン・顧客向け画面には一切表示しない（裏側に閉じる）。
+- **保存（API）**: `POST /applications` が `agentCode` を**正規化**（trim・空→未設定NULL・上限64文字）して
+  `applications.agent_code` に保存する。任意項目のため未指定でも申込作成は従来どおり成功し、既存バリデーション
+  （電話/メール/区分/同意）の挙動・文言は不変。
+- **手動補正（admin）**: 申込一覧に「代理店コード」列（未設定は「未設定」表示）、申込詳細に編集UI を追加。
+  `PUT /applications/:id/agent-code`（**管理者専用**）で上書き・空保存で削除でき、**手動値が最終的な正**。
+  自動取得は新規申込作成時のみ働くため、既存申込を自動取得が後から上書きすることはない。
+
+> 精算用CSV（代理店コード・支払日列・支払日期間フィルタ）は `docs/product/cancellation-flow.md` を参照。
 
 ## 申請の削除（論理削除 / 退会化 + 顧客PIIマスク + 90日バックアップ）
 
@@ -87,7 +198,7 @@ Tx 外・best-effort）。既に削除済みの申請を再削除しても**冪�
 | 条件付きマスク | `applications.partnerName` / `partnerNameKana` | `entityType==='個人'`（個人事業主本人の氏名）→ マスク。`'法人'`（法人名）→ 保持 |
 | **マスク（固定文字列 `***`）** | `cancellations.customerName` / `customerEmail` / `customerPhone` | 請求の顧客 PII を消去（NULL ではなく `***`。当該 3 列は NOT NULL） |
 | ステータス変更 | `applications.status` → `withdrawn`（退会） | 退会は削除でのみ到達する内部遷移（手動変更不可） |
-| 保持 | `businessName`(屋号), `corporateNumber`(法人番号), `tRegistrationNumber`(インボイス登録番号), 住所, `entityType`, Stripe 系 | 会計・請求履歴のため保持 |
+| 保持 | `businessName`(屋号), `corporateNumber`(法人番号), `tRegistrationNumber`(適格請求書登録番号 / T番号), 住所, `entityType`, Stripe 系 | 会計・請求履歴のため保持 |
 | 保持 | キャンセル請求の金額・明細・`applicationId`・Stripe 関連 | 請求書本体として保持（行は削除しない） |
 
 ### 退会（withdrawn）ステータスのライフサイクル
@@ -126,9 +237,15 @@ Tx 外・best-effort）。既に削除済みの申請を再削除しても**冪�
 
 | ファイル | 役割 |
 |---|---|
-| `cancel-billing-service-lp/src/App.jsx` | LP 申請フォーム |
+| `cancel-billing-service-lp/src/App.jsx` | LP 申請フォーム・独自ルーティング（`/verify-email` / `/verify-email-sent` 含む） |
+| `cancel-billing-service-lp/src/components/VerifyEmailSent.jsx` | 認証メール送信のご案内ページ（申込送信成功時の遷移先。GTSS-883。title / noindex は `src/seo.js` が設定） |
+| `cancel-billing-service-lp/src/utils/navigation.js` | 送信成功時の遷移ヘルパー（`goToVerifyEmailSent`。GTSS-883） |
+| `cancel-billing-service-lp/src/components/EmailVerify.jsx` | メール認証結果画面（verified/expired/already_verified/invalid。GTSS-842） |
 | `cancel-billing-service-lp/src/components/StripeSuccess.jsx` | Stripe登録完了判定 |
 | `cancel-billing-service-lp/src/components/StripeRefresh.jsx` | Stripe リンク再発行 |
-| `cancel-billing-service-admin/src/components/ApplicationList.tsx` | 申請一覧（管理画面） |
-| `cancel-billing-service-admin/src/components/ApplicationDetail.tsx` | 申請詳細・承認/却下 |
-| `cancel-billing-service-api/src/lambda.ts` | API ハンドラ（申請作成・ステータス更新・メール送信） |
+| `cancel-billing-service-admin/src/components/ApplicationList.tsx` | 申請一覧（管理画面）・ステータスフィルタ |
+| `cancel-billing-service-admin/src/components/ApplicationDetailLayout.tsx` | 申請詳細・審査アクション（`getAvailableStatusActions`） |
+| `cancel-billing-service-admin/src/constants/applicationStatus.ts` | admin 側ステータス enum/ラベル/バッジ/審査アクション定義 |
+| `cancel-billing-service-api/src/constants/application-enums.ts` | 申請ステータス/事業区分 enum・正規化・ラベル（SSoT） |
+| `cancel-billing-service-api/src/services/application.service.ts` | 申請作成（`createApplication`）・メール認証（`verifyEmail`）・ステータス更新（メール送信含む） |
+| `cancel-billing-service-api/src/handlers/applications.handler.ts` | 申請ルート（`POST /applications` / `POST /applications/verify-email` / `PUT /applications/:id/status` 等） |

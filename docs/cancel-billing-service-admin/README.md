@@ -17,15 +17,21 @@ GTSS 運営者がサロン申請の審査やキャンセル請求の管理を行
 |---|---|---|
 | ログイン | `LoginPage.tsx` | 管理者ログイン |
 | ダッシュボード | `Dashboard.tsx` | 概況・統計 |
-| 申請一覧 | `ApplicationList.tsx` | 申請を絞り込み・並び替え |
-| 申請詳細 | `ApplicationDetail.tsx` | 承認 / 却下、Stripe メール再送 |
-| キャンセル請求管理 | `CancellationManagement.tsx` | キャンセル請求の登録・進捗管理 |
+| 申請一覧 | `ApplicationList.tsx` | 申請を絞り込み・並び替え。「詳細」は `/applications/:id` の詳細ページへ遷移 |
+| 申請詳細（ページ） | `ApplicationDetailLayout.tsx` / `ApplicationDetail.tsx` | `/applications/:id`。常時表示ヘッダー（承認/却下・削除・Stripe メール送信・**連携単位選択**）＋会社スコープのサブナビ＋`<Outlet>` |
+| 店舗 | `StoreList.tsx` / `StoreForm.tsx` | 会社詳細の店舗一覧・作成・更新・削除。店舗単位はサロンボード連携（ログインのみ・単一店舗自動取得）を伴う。会社単位は読み取り専用 |
+| キャンセル請求管理 | `CancellationManagement.tsx` | キャンセル請求の登録・進捗管理。`applicationId` props で会社スコープ表示＋その会社のみの取り込み実行 |
+| 取り込みログ | `ImportLogList.tsx` | 取り込みログ。`applicationId` でフィルター |
+| 取り込み実行履歴 | `ImportRunList.tsx` | 実行記録（会社単位）。`applicationId` でフィルター |
+| サロンボード連携（会社単位） | `SalonboardIntegration.tsx` | 会社単位のログイン検証→ヘアサロン一覧確認→保存 |
 | Stripe 再オンボーディング | `StripeReauth.tsx` | サロン代理での再リンク発行 |
 | Stripe 完了 | `StripeSuccess.tsx` | サロン Stripe 登録結果確認 |
-| 共通ヘッダ | `Header.tsx` | ナビゲーション |
+| 共通ヘッダ | `Header.tsx` | グローバル／会社詳細でメニューを出し分けるナビゲーション |
 | トースト通知 | `Toast.tsx` | 操作結果表示 |
 
-ルーティング: `src/App.tsx`
+ルーティング: `src/App.tsx`（`/applications/:id` 配下に `shops`/`cancellations`/`import-logs`/`import-runs` のネストルート。
+キャンセル請求管理・取り込みログ・取り込み実行履歴はグローバルと会社詳細で**同一コンポーネントを再利用**し、差分は
+`applicationId` フィルターの有無のみ）。
 
 ## API 通信
 
@@ -65,7 +71,9 @@ cd ../cancel-billing-service-api && node create-admin-user.js
 
 ## テスト
 
-未整備。vitest 推奨（ルート CLAUDE.md 参照）。
+整備済み。**Vitest**（コンポーネント unit。`src/components/__tests__`・`npm run test` = `tsc -p tsconfig.vitest.json` + `vitest run`）と
+**Playwright**（e2e。`e2e/`・`npm run test:e2e`。API は `e2e/fixtures.ts` の `mockApi` でルートモックし実 API 不要）。
+画面仕様は原則 Playwright で統合テスト、出し分け・props 伝播・バリデーションは Vitest で補完する。
 
 ## 注意事項
 
@@ -76,4 +84,6 @@ cd ../cancel-billing-service-api && node create-admin-user.js
 
 - `docs/product/application-flow.md` — 申請審査フロー
 - `docs/product/cancellation-flow.md` — キャンセル請求の登録
+- `docs/product/salonboard-import.md` — サロンボード取り込み（連携単位・店舗CRUD・会社スコープIA）
+- `docs/tech/salonboard-import.md` — サロンボード取り込みの技術仕様
 - `docs/tech/auth.md` — 管理者認証

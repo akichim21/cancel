@@ -16,6 +16,14 @@
 - **インフラ**: `~/infra/cancel-billing-service-infra` の `modules/batch-compute`（dev/prod の `main.tf` から呼び出し）。
   apply は人手ゲート。詳細は同リポジトリ README を参照。
 
+> **ECS(Fargate) 直列実行（GTSS-860）**: 月次入金（`run-monthly-payouts`）とサロンボード取り込み
+> （`salonboard-import`）は、対象を 1 件ずつ直列処理する構造による Lambda timeout を、**分散処理を持ち込まず**
+> **実行時間上限の無い Fargate タスクで既存の直列ループを走らせて**解消する。EventBridge Scheduler の起動先を
+> Lambda invoke → **ECS RunTask** に切り替える（`local.batch_execution="ecs"｜"lambda"` で新旧切替・ロールバック）。
+> 先行着手した SQS ファンアウト（`GTSS-854-sqs` / 親リポ #35）は分散処理の付随複雑さのため**破棄**した。
+> 設計・コンテナ構成・デプロイ/ロールバック・段階移行は [batch-fargate.md](./batch-fargate.md) を参照。
+> `purge-expired-backups` は対象外（現行 Lambda + Scheduler のまま）。
+
 ## dispatch ペイロード
 
 batch Lambda は `event.action` で処理を振り分ける（未知 action はエラー）:

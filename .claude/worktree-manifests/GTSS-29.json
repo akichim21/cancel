@@ -1,0 +1,35 @@
+{
+  "issueNumber": 29,
+  "branchName": "GTSS-817-29",
+  "baseBranchOverride": "GTSS-817-28",
+  "worktreeDir": "GTSS-817-29",
+  "slot": 6,
+  "ports": {
+    "api": 1344,
+    "admin": 3006,
+    "userPortal": 5179,
+    "lp": 5279
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-817-29",
+      "branch": "GTSS-817-29",
+      "baseBranch": "GTSS-817-28"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/GTSS-817-29",
+      "branch": "GTSS-817-29",
+      "baseBranch": "GTSS-817-27",
+      "prBase": "GTSS-817",
+      "prBaseNote": "GTSS-817-27 はマージ済みで remote から削除されたため PR base は GTSS-817"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

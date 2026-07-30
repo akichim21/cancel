@@ -1,0 +1,30 @@
+{
+  "issueNumber": 25,
+  "branchName": "GTSS-817-kirei",
+  "baseBranchOverride": "GTSS-817",
+  "worktreeDir": "GTSS-817-kirei",
+  "slot": 7,
+  "ports": {
+    "api": 1345,
+    "admin": 3007,
+    "userPortal": 5180,
+    "lp": 5280
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-817-kirei",
+      "branch": "GTSS-817-kirei",
+      "baseBranch": "GTSS-817"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

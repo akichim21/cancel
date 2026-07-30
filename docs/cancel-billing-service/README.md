@@ -8,6 +8,7 @@
 - Tailwind CSS
 - React Router v7
 - 認証: JWT（Context API: `src/contexts/AuthContext.tsx`）
+- 完了バナーの表示要求: `src/contexts/FlashContext.tsx`（メモリ保持・8 秒の自動消灯タイマーを所有）
 
 ## 画面一覧
 
@@ -18,13 +19,21 @@
 | パスワードリセット | `ResetPasswordPage.tsx` | `/reset-password` |
 | パスワード変更 | `ChangePasswordPage.tsx` | `/change-password` |
 | ダッシュボード | `Dashboard.tsx` | `/` |
+| 完了バナー（共通・ヘッダ直下に1箇所） | `SuccessBanner.tsx` | —（全保護画面） |
 | キャンセル請求一覧 | `InvoiceList.tsx` | `/invoices` |
 | キャンセル請求登録 | `InvoiceForm.tsx` | `/invoices/new` |
+| アカウント設定 | `SettingsPage.tsx` | `/settings` |
 | Stripe 再オンボーディング | `StripeReauth.tsx` | `/stripe/reauth` |
 | Stripe 完了 | `StripeSuccess.tsx` | `/stripe/success` |
 | ヘッダ（共通） | `Header.tsx` | — |
 
-最終的なルーティングは `src/App.tsx` 参照。
+最終的なルーティングは `src/App.tsx` 参照。Provider のネスト順は `FlashProvider` → `AuthProvider` → `Router`
+（`AuthProvider.logout` が完了バナーの表示要求を破棄するため Flash が外側）。
+
+**パスワード変更後の遷移（GTSS-852 / #43）**: 初回変更（`mustChangePassword=true`）はログアウトせず
+ダッシュボード（`/`）へ着地し、通常変更は変更画面に留まって入力欄をクリアする。いずれも完了バナー
+「パスワードを変更しました / 新しいパスワードでそのままご利用いただけます。」を表示する。詳細は
+`docs/tech/auth.md`「パスワード操作」。
 
 ## API 通信
 
@@ -59,12 +68,19 @@ npm run build:prod  # prod 向けビルド
 
 ## テスト
 
-未整備。**追加時は vitest を使用すること**（ルート CLAUDE.md 参照）。
-推奨セットアップ:
+**Vitest（コンポーネント単体）＋ Playwright（e2e）を導入済み**。
 
 ```bash
-npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom
+npm test            # typecheck:test（tsconfig.vitest.json）+ vitest run
+npm run test:watch  # ウォッチモード
+npm run test:coverage
+npm run test:e2e    # Playwright（e2e/ 配下）
 ```
+
+- Vitest: `src/components/__tests__/*.test.tsx`（`SettingsPage` / `InvoiceForm` / `InvoiceList` /
+  `Dashboard` / `LoginPage` / `StoreManagement` ほか）
+- Playwright: `e2e/*.spec.ts`（ログイン・請求登録・店舗管理などの画面フロー）
+- `predeploy` で `lint` と `npm test` が走るため、デプロイ前に必ずテストが実行される
 
 ## 関連ドキュメント
 

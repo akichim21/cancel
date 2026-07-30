@@ -122,6 +122,31 @@
   3. `{ exact: true }` を指定
   4. より具体的なロケーター（`getByRole('columnheader', { name: '...' })`等）を使う
 
+### 同ラベルのボタンを共有画面に追加したら他スペックの未スコープ locator を壊す → container スコープ + フル e2e（必須）
+- **問題**: 共有画面（例: 申込詳細）に新しい「保存」ボタンを追加したら、別スペック（`company-detail-context.spec.ts`）の**未スコープな** `page.getByRole('button', { name: '保存' })` が複数マッチして strict mode 違反で落ちた。自分が触ったスペック（application/cancellation）だけ実行していたため初回は見逃し、**フル e2e スイート実行で初めて発覚**した。
+- **正しい対応**:
+  1. アクション系ボタンの locator は必ず container/testid にスコープする: `page.getByTestId('salonboard-confirm').getByRole('button', { name: '保存' })`。他スペックが既にこの形なら、ボタン追加で壊れない。
+  2. **共有画面に新規ボタン/要素を足したら、触ったスペックだけでなくフル e2e を実行**してから完了とする。
+- **注意**: `getByRole(name)` は既定で**部分一致**。`代理店コードを保存` に改名しても `name: '保存'` クエリにヒットするため、改名では衝突回避できない。スコープ（container 限定）か `{ exact: true }` で解決する。
+- **関連**: 「getByText()のstrict mode違反」。同じ strict mode 問題が getByRole の name 部分一致でも起きる。
+
+### `fill()` 後の `toHaveValue(同値)` は保存往復を検証しない（必須）
+- **問題**: 入力欄を `fill('other')` してから保存ボタンを押し、`expect(input).toHaveValue('other')` で確認するテストは、**保存が一切効かなくても緑**になる（値は fill が既にセット済みのため）。
+- **正しい対応**: 保存の往復を verify する。`page.waitForRequest`(PUT/POST) で送信 payload を確認する／成功トーストを待つ／再取得（reload またはクライアント遷移）後に反映を確認する。
+- **例**:
+  ```ts
+  // ❌ NG: fill 済みなので保存が壊れても緑
+  await input.fill('other');
+  await saveBtn.click();
+  await expect(input).toHaveValue('other');
+
+  // ✅ OK: PUT 発行と payload を確認
+  const put = page.waitForRequest(r => r.url().includes('/agent-code') && r.method() === 'PUT');
+  await input.fill('other');
+  await saveBtn.click();
+  expect(JSON.parse((await put).postData() || '{}').agentCode).toBe('other');
+  ```
+
 ### auto-auth fixtureパターン（storageStateセッション切れ対策）
 - **問題**: storageStateで保存したセッションが85-120秒程度で期限切れになり、後半のテストでログインページが表示されて失敗する
 - **正しい対応**: `test.extend` でauto-authフィクスチャを作成し、ページ遷移時にサイドバーが見えなければ自動で再認証する。全テストファイルでこのフィクスチャを `import { test } from './fixtures'` で使用する
@@ -255,3 +280,46 @@
 ### 巨大 spec ファイル（1000 行超）は機能別に分割する
 - **問題**: 1 つの spec に複数機能（一覧 / 詳細 / 編集 / 検索 / フィルター 等）を詰め込みがち。CI 並列度低下 + メンテ性悪化
 - **正しい対応**: ファイル単位 parallel default なので、機能別 spec に分割する
+
+## Playwright 自動化（ブラウザ駆動クライアント）実装パターン
+
+> 上記は E2E テスト作成のパターン。以下は Playwright をスクレイピング/自動化クライアント
+> （例: `SalonboardPlaywrightClient`）として使う実装で学んだパターン。
+
+### 成功判定を「最終ページ」で読むとアカウント種別差で false-negative になる（必須）
+- **問題**: ログイン等の成功シグナル（例: `userid : '...'`）を **遷移後の最終ページ HTML** から読むと、アカウント種別で着地ページが異なる場合に取りこぼす。実例（GTSS-817 #22）: pure HTTP 実装は doLogin 応答から `userid` を直接読んでいたが、Playwright 移植時に「クリック→遷移後の `page.content()`」から読むようにしたところ、**会社アカウントは login 後 `/CNC/groupTop/`（userid あり）だが、単一店舗アカウントは `/CLP/bt/top/`（店舗トップ・userid なし）へ遷移**するため、ログイン成功なのに `ok:false`（false-negative）になった。実機 T-11 で初めて顕在化（unit fake では会社アカウントの着地ページしか模していなかった）。
+- **正しい対応**: 成功シグナルが載る **中間レスポンス（doLogin 等）を `page.on('response')` で捕捉**して判定する。最終ページにも残る場合があるのでフォールバックとして併用する。
+  ```ts
+  let body = '';
+  page.on('response', async (resp) => {
+    try {
+      if (String(resp.url()).includes('/CNC/login/doLogin/')) {
+        const t = await resp.text();
+        if (t) body = t; // 途中 redirect 等で複数発火しても最終本文を採用
+      }
+    } catch { /* 個別応答の本文取得失敗は無視 */ }
+  });
+  await page.click('a.loginBtnSize');
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForTimeout(1200); // response handler(async text) の settle 待ち
+  const finalHtml = await page.content();
+  const userId = parseUserId(body) || parseUserId(finalHtml); // 中間応答 → 最終ページの順
+  ```
+- **補足**: `page.waitForResponse(predicate)` は「最初にマッチした応答」を返すため、途中 redirect で複数発火するフローでは目的の本文を取り逃すことがある（実際に最初これで詰まった）。`page.on('response')` で最後にマッチした本文を保持する方が確実。
+- **テストの教訓**: pure 関数（成功判定）は単体テストできても、**「どのページから読むか」はアカウント種別ごとに着地が変わる**ため fake だけでは漏れる。fake には「成功シグナルが中間応答のみにあり最終ページには無い」ケース（単一店舗）も必ず含める（回帰テスト T-1b）。
+
+### 実ブラウザ自動化は「実機 1 本」を必ず通す（pure 関数の単体テストだけでは足りない）
+- **問題**: ブラウザ駆動クライアントはセレクタ・遷移・Akamai 等の bot 保護・アカウント種別差など、fake では再現しきれない要素が多い。pure ヘルパー（パース・判定）の単体テストが green でも、実機で初めて壊れる（上記 login false-negative も実機 T-11 で発覚）。
+- **正しい対応**: CI では fake + fixture で論理を担保しつつ、**実アカウント・実プロキシでの「login → 一覧 → 詳細」最低 1 本を人手 PDCA で必ず通す**。外部・bot 保護下で CI 不可なら人手確認を受け入れ条件に明示する。
+
+### 取得結果は「生 HTML/JSON」で返し、パースは純粋関数へ分離する
+- **問題**: ブラウザ内で DOM 抽出までやると transport と parse が密結合になり、fixture 単体テストが書けず HTTP 実装との挙動差も出る。
+- **正しい対応**: クライアントは `page.content()` / ページ内 `fetch` の **生レスポンスをそのまま返し**、解析は純粋関数（`parseReservationList` 等）へ委譲する。これで HTTP/Playwright どちらの transport でも同一パーサ・同一 fixture テストを共有でき、実機で採取した HTML をそのまま fixture 化できる（PII は置換）。
+
+### フォーム検索が「サイレント0件」なら submit 先 URL（action+method）を疑う（必須）
+- **問題**: Struts/jQuery 等のフレームワークでは、検索ボタンの click handler が **form の action にメソッド名を付与して** submit することがある。例: SalonBoard キレイは `$.shuhari.formSubmit("reserveList","search")`（`formSubmit = (id, method) => { $form.attr('action', action + method); $form.submit(); }`）で、action `/KLP/reserve/reserveList/` ＋ `search` → 実際は **`POST /KLP/reserve/reserveList/search`** へ送られる。form の action 属性（base パス）にそのまま `fetch`/`form.submit()` で POST すると、**サーバは検索を実行せず初期フォーム（0件）を返す**。例外も 4xx も出ず「正常に0件」に見えるため、フィルタ条件や日付範囲のせいだと誤診しやすい（実際この案件で「広い期間・状態無指定でも0件」を当初フィルタの問題と取り違えた）。
+- **正しい対応**:
+  - `form.submit()` / action への raw POST を鵜呑みにせず、**検索ボタンの実 handler（バンドル JS の click handler）を読んで** 実際の submit 先 URL・追加パラメータ・hidden flag を確認する。`href="javascript:void(0)"` のボタンは必ず JS handler 経由。
+  - **「広い条件でも0件」なら submit が効いていない可能性をまず疑う**（フィルタではなく送信先）。初期フォーム GET と検索 POST のレスポンスを比較（サイズ／結果テーブルの有無）して、検索が実行されたか確認する。
+  - 修正は HTTP / Playwright **両トランスポートに同じ submit 先**を反映する（片方だけ直すと取り違える）。
+- **教訓（実構造は実データで確定する）**: 実機で「行が出る条件」をユーザー/実機で1本通してから、一覧行・詳細のパース構造を確定する。**推定構造は実構造とズレる**: 今回は (1) 列見出しの `<br>` 由来の空白（「ステー タス」でラベル不一致）、(2) 来店日時が `MM/DD`（年なし→取得期間から補完が必要）、(3) 氏名セルに「(予約番号)」混入、(4) 金額の二段表記（先頭値のみ採用）が、いずれも実 HTML で初めて判明した。0件店舗の推定 fixture だけでテストを green にすると、実データで壊れる。
