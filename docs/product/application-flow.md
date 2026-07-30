@@ -74,8 +74,11 @@ LP申込で入力ミス・他人のメールアドレスでの申込を弾くた
     使わない（完了の案内は認証完了画面側の役割）。申請ID・入力情報は表示せず、URL は固定パス
     （クエリ・ハッシュに個人情報・申請ID・代理店コードを含めない）。
   - 表示専用でサーバー通信を行わない（直接アクセス・再読み込みでも二重登録は起きない）。
-  - **noindex はこのページの表示中のみ**動的に `meta[name="robots"]`（`noindex, nofollow`）を挿入して適用
-    （LP は全ルートが同一 HTML を共有する SPA のため、LP 本体・既存ページへ波及させない）。
+  - **noindex はこのページのみ**に適用する（`meta[name="robots"]` = `noindex, nofollow`）。LP は全ルートが
+    同一 HTML を共有する SPA のため、LP 本体・公開ページ（利用規約／プライバシーポリシー／特商法表記）へ
+    波及させない。適用は SEO を単一管理する `cancel-billing-service-lp/src/seo.js` の `verify-email-sent`
+    エントリが担い（title も同エントリが設定）、ページコンポーネント側では head を触らない（GTSS-887 で
+    ページ別 title / description / canonical / noindex を `seo.js` へ集約したため）。
 - **認証メール**（申込者宛）: 宛名（事業者名）＋認証URL（`{LPベースURL}/verify-email?token=...`）＋
   有効期限（24時間）の案内。送信は本番=SMTP / それ以外=SES、送信元 `info@cancel.co.jp`。
 - **認証画面**（`/verify-email`、`cancel-billing-service-lp/src/components/EmailVerify.jsx`）: URL の `token` を
@@ -235,7 +238,7 @@ Tx 外・best-effort）。既に削除済みの申請を再削除しても**冪�
 | ファイル | 役割 |
 |---|---|
 | `cancel-billing-service-lp/src/App.jsx` | LP 申請フォーム・独自ルーティング（`/verify-email` / `/verify-email-sent` 含む） |
-| `cancel-billing-service-lp/src/components/VerifyEmailSent.jsx` | 認証メール送信のご案内ページ（申込送信成功時の遷移先・noindex 動的適用。GTSS-883） |
+| `cancel-billing-service-lp/src/components/VerifyEmailSent.jsx` | 認証メール送信のご案内ページ（申込送信成功時の遷移先。GTSS-883。title / noindex は `src/seo.js` が設定） |
 | `cancel-billing-service-lp/src/utils/navigation.js` | 送信成功時の遷移ヘルパー（`goToVerifyEmailSent`。GTSS-883） |
 | `cancel-billing-service-lp/src/components/EmailVerify.jsx` | メール認証結果画面（verified/expired/already_verified/invalid。GTSS-842） |
 | `cancel-billing-service-lp/src/components/StripeSuccess.jsx` | Stripe登録完了判定 |

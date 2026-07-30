@@ -17,7 +17,7 @@
 | パス | コンポーネント | 用途 |
 |---|---|---|
 | `/` | `src/App.jsx` | メイン LP・申請フォーム |
-| `/verify-email-sent` | `src/components/VerifyEmailSent.jsx` | 申込送信成功時の認証メール送信のご案内（表示中のみ noindex 動的適用。GTSS-883） |
+| `/verify-email-sent` | `src/components/VerifyEmailSent.jsx` | 申込送信成功時の認証メール送信のご案内（このページのみ noindex。title / robots は `src/seo.js` が設定。GTSS-883） |
 | `/verify-email` | `src/components/EmailVerify.jsx` | メール認証結果（認証完了/期限切れ/認証済み/無効リンク。GTSS-842） |
 | `/stripe-success` | `src/components/StripeSuccess.jsx` | Stripe 登録完了判定 |
 | `/stripe-refresh` | `src/components/StripeRefresh.jsx` | Account Link 再発行 |
