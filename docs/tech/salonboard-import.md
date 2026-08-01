@@ -72,15 +72,67 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
   - 一覧に支払い種別の確定ラベルは無いため `paymentType=null`（詳細が権威）。`isLocalPayment` は `現地決済` も許容。
 - **詳細（実機 HTML で確認済み）**: `parseKireiReservationDetail` はヘアと同じ `<th>ラベル</th><td>値</td>`。予約番号/ステータス/支払い種別/**予約時キャンセル規定**/氏名(カナ)/氏名(漢字)/電話番号/合計金額/来店日時/受信日時 はヘアと同名ラベルで抽出成功。**HPB 経由予約はメールアドレス列が無い**（email は null、連絡は電話）。カナセルの「統合候補のお客様情報を確認する」等のリンク文言は `cleanName` で除去。
 - **実機検証状況**: ログイン/着地/種別判定/店舗単位 verify、`POST …/search` の検索実行、一覧行パース（実 2 行）、詳細パース（実 1 件・規定あり）まで**実データでライブ検証済み**。ただし対象店舗に **お客様/無断キャンセル（状態 7,9）の予約が 0 件**のため、状態 7,9 で絞った実一覧行・キャンセル詳細（キャンセル処理日等）の確認のみキャンセル実績のある店舗で別途必要。
-- **トランスポート**: HTTP/Playwright 両実装あり。dev/prod は Playwright + Decodo プロキシ（Akamai 回避）。
+- **トランスポート**: HTTP/Playwright 両実装あり。**既定は `http`**（`SALONBOARD_TRANSPORT=playwright` で明示 opt-in。本節冒頭の記述に合わせる）。dev/prod はどちらの transport でも **Decodo プロキシ必須**（AWS の egress IP は Akamai に遮断されるため）。
 
 ### 店舗単位連携の単一店舗自動取得（REQ-8・#23・2026-06-13 実証）
 
 店舗単位連携は **ログインの成否のみ**を確認し、単一店舗の店舗ID・店舗名を自動取得する（多店舗の一覧クロール・確認画面は使わない）。実アカウント2種で挙動を実証:
-- **会社アカウント**（`CD34512`）: groupTop に `biyouStoreInfoArea`（14店舗）。`parseSalons`（ヘア＋キレイ）が **2件以上** → 会社アカウントと判定しエラー（会社単位連携を促す・未保存）。
+- **会社アカウント**（`CD34512`）: groupTop に `biyouStoreInfoArea`（14店舗）。`parseSalons`（ヘア＋キレイ）が **1件以上** → 会社アカウントと判定しエラー（連携単位の変更を促す・未保存）。
 - **単一店舗アカウント**（`CD77768`）: `POST /CNC/groupTop/` は **システムエラー画面**（区分テーブル無し、`parseSalons`=0）を返すが、hidden `<input name="STORE_ID" value="H…">` に唯一の店舗IDを埋め込む。続けて `POST /CLP/bt/top/`（`isViaLogin=true`・forward 不要）で店舗TOPが返り、`sc_data` の `"storeid":"H…"` ＋ パンくず（`class="path"` 内 `{店舗名}様 / {店舗ID} / …`）から店舗ID・店舗名を取得（`parseStoreTop`）。
-- 判定フロー: `parseSalons>=2`→会社エラー / `==1`→その1店舗を採用 / `==0`→店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存）。ログイン失敗もエラー・未保存。
+
+#### 判定フローと評価順（GTSS-890 で「2件以上」→「1件以上」へ厳格化）
+
+判定は `decideShopVerify({ salonCount, effectiveUnit, hasMatchingLinkedShop })`（`salonboard-auth.service.ts` の
+**DB 非依存の純粋関数**。DB 参照は呼び出し側が解決して boolean / 実効単位に落として渡す）に集約し、次の順で評価する。
+先に成立した分岐で確定し、以降は評価しない。
+
+| # | 条件 | 結果 |
+|---|---|---|
+| 1 | 実効単位が `company` | `company-unit-guard` → 既存の店舗追加ガードと同じ文言 |
+| 2 | `parseSalons` が **2件以上** | `company-account` → 会社アカウント文言（1件が既存リンクと一致していても救済しない） |
+| 3 | `parseSalons` が **1件** | 救済成立なら `adopt-listed-shop`（従来どおり採用）／不成立なら `company-account` |
+| 4 | `parseSalons` が **0件** | `single-store` → 店舗TOP取得＋`parseStoreTop`（取得不可はエラー・未保存） |
+
+ログイン失敗もエラー・未保存。**店舗一覧テーブルが描画されるのは会社アカウントのみ**（配下 1 店舗でも会社アカウント）
+という前提に基づく厳格化で、ヘア区分・キレイ区分の店舗は合算して数える。
+
+**グランドファザリング（救済）**: 厳格化前に「店舗 1 件の会社アカウント」で登録された店舗の再連携が弾かれないよう、
+`hasMatchingLinkedShop` が真のときだけ 1 件パスを通す。呼び出し側（`verifySalonboardShopLogin` の `context`）は
+`applicationId` と `shopId` の両方があるときに限り
+`shopIntegrationsRepo.findLinkedByApplicationShopSource(applicationId, shopId, source)`（**`linked=true` 条件込み**。
+既存の `findByApplicationSourceStore` は `linked` を条件に含まないため要件を満たさない）を引き、その外部店舗IDが
+取得できた 1 件と一致するかで判定する。**新規作成経路（`shopId` を渡さない）・会社/対象店舗の指定が無い単体検証・
+未連携リンク・別店舗／別会社／別 source のリンクとの一致**はすべて false に落ちて救済されない。
+DB には店舗一覧テーブル由来か否かの痕跡が残らず既存レコードから対象を特定できないため、この救済で
+事前のデータ調査・マイグレーションを不要にしている。
+
+**文言の出し分け**（`src/constants/salonboard-messages.ts`。実装内の重複排除のためだけの定数で、**テストからは
+import しない**＝文言が変わっても検証が無効化されないようにする）: 会社アカウント判定時は `getIntegrationUnit` の
+`unitLocked` で「連携単位を会社単位へ変更するよう促す文言」と「確定済みで変更できないため店舗単位ログインの入力を
+促す文言」を出し分ける。会社を指定しない検証・存在しない会社IDでは確定状態を判定できないため前者を返す。
+会社アカウント判定は**店舗名・店舗種別の妥当性判定より前**に評価する（店舗名が空でも会社アカウント文言になる）。
+
 - パーサ: `extractHiddenStoreId`（hidden STORE_ID）/ `parseStoreTop`（店舗TOP）。fixture: `group-top-single-store.html` / `store-top-single.html`（PII置換済み）。
+
+#### 会社単位検証での単一店舗アカウント検出（GTSS-890 / REQ-2）
+
+会社単位の verify（`verifySalonboardLogin`）は店舗 0 件を一律「店舗を取得できませんでした」で返していたため、
+**単位ミスマッチ（店舗単位ログインの入力）と一般的な取得失敗が区別できなかった**。`detectAccountUnit({ html })`
+（`salonboard-parser.ts`）で 0 件時のアカウント種別を判定し、2 分岐する。
+
+- **判定シグナル**（**追加のネットワークリクエストを発行しない**。既存パーサの合成のみ）:
+  1. `parseSalons` が 1 件以上 → `'company'`
+  2. hidden `STORE_ID`（`extractHiddenStoreId`。単一店舗アカウントのシステムエラー画面。会社アカウントは空文字）→ `'shop'`
+  3. 会社トップ HTML を店舗トップとして解析でき店舗IDが取れる（`parseStoreTop`。Playwright は単一店舗だとログイン直後に
+     店舗トップへ着地するため会社トップ HTML の中身が店舗トップになる）→ `'shop'`
+  4. いずれも取れない → `null`（判定不能）
+- **シグナル競合時は会社アカウント判定を優先**（店舗一覧 1 件＋hidden `STORE_ID` が同時に取れるケース）。
+- **着地 URL には依存させない**（HTTP トランスポートでは着地URLが常に空のため、判定は会社トップ HTML のみに依存）。
+  トランスポート差分（HTTP=システムエラー画面／Playwright=店舗トップ着地）は 2 シグナルの OR で吸収する。
+- `'shop'` → 「店舗単位のログイン情報です。連携単位を「店舗単位」に変更してから…」／`null` → 従来文言のまま。
+  **`null` 分岐は潰さない**（HTML 変更による取得失敗を「店舗単位に変更してください」と誤案内すると運営が誤った単位へ切り替える）。
+- 会社単位パネルは lock 済み会社では描画されないため、この経路に lock 分岐は持たない（`verifySalonboardLogin` の契約は不変）。
+- キレイの単一店舗アカウントも会社トップはシステムエラーになりシグナルは種別非依存。文言に種別（ヘア／キレイ）は含めない。
 
 #### 店舗種別の自動判定（GTSS-817-kirei #25・REQ-6・2026-06-18/19 実機検証）
 
@@ -101,7 +153,7 @@ groupTop HTML の `id="biyouStoreInfoArea"` テーブル（ヘア区分）と `i
 - **取得は素の `GET`（Struts TOKEN 不要）**。`プレビューを見る` ボタンは `org.apache.struts.taglib.html.TOKEN`/`STORE_ID`/`modified` 付き POST だが、ログイン済み店舗セッションでは素の GET でも同一の住所ページが返る（POST から TOKEN を抜いても 200・住所あり。店舗はセッション cookie から解決され POST した `STORE_ID` に依存しない）。`reflectTop` への遷移・クリックは不要。
 - **媒体別 URL（末尾スラッシュ差）**: ヘア=`GET /CNB/preview/storeInfoPreview/`（末尾スラッシュ**あり**）/ キレイ=`GET /CNK/preview/storeInfoPreview`（**なし**）。`プレビューを見る` の `onclick`（`sendToStoreInfo(...,'/CNB/preview/storeInfoPreview/',…)` / `'/CNK/preview/storeInfoPreview'`）と一致させる。**逆のスラッシュだと住所無しの空（~3.8KB）ページが返る**。定数 `STORE_INFO_PREVIEW_PATH`（`salonboard-client.ts`）で媒体別に明示。
 - **生 HTML は数値文字参照でエンコードされる**（住所セルが `&#21271;&#28023;&#36947;…`）。`fetch().text()` の生本文をパースするため**必ずデコードが要る**（ブラウザ描画＝Playwright `page.content()` では復号済みだが取得は生 HTTP）。`parseStoreAddress`（`salonboard-parser.ts`）が `住所` ラベルの `<th>`→`<td>` を抽出し、`decodeHtmlEntities`（10進 `&#NNNN;`・16進 `&#xNN;`・`&nbsp;`・`&amp;` 等）でデコード → タグ除去 → 制御文字/全角空白の正規化 → 連続空白の単一化 → 前後トリム → 最大長（200）トリムで 1 行に正規化。住所セル不在・デコード後空文字は `null`。
-- **店舗コンテキストの確立**（HTTP トランスポート）: プレビュー GET は店舗コンテキスト確立後でないと空/エラーになる。0件パス（単一店舗）は `fetchStoreTopHtml`(/CLP/bt/top/) / `fetchKireiStoreTopHtml`(/KLP/top/) または Playwright のログイン着地で確立済み。**1件パス（会社アカウントだが店舗1件）は現状 forward を踏まず即 return するため、住所取得の前に解決済み `externalStoreId` で `enterStore`(designKbn=B) / `enterKireiStore`(designKbn=K) を呼んでコンテキストを確立**してから GET する。
+- **店舗コンテキストの確立**（HTTP トランスポート）: プレビュー GET は店舗コンテキスト確立後でないと空/エラーになる。0件パス（単一店舗）は `fetchStoreTopHtml`(/CLP/bt/top/) / `fetchKireiStoreTopHtml`(/KLP/top/) または Playwright のログイン着地で確立済み。**1件パスは forward を踏まず即 return するため、住所取得の前に解決済み `externalStoreId` で `enterStore`(designKbn=B) / `enterKireiStore`(designKbn=K) を呼んでコンテキストを確立**してから GET する。なお GTSS-890 以降、**1件パスは「店舗編集からの再検証で対象店舗自身の連携済みリンクと一致した」救済ケース専用**になった（新規作成経路では到達しない）ため、この住所取得順序の担保も救済成立ケースの e2e（`salonboard-store.test.js`）に置いている。
 - **失敗許容（クリティカルパスにしない）**: 取得メソッドの失敗契約は「HTML を返す / CAPTCHA は型付き throw（`SalonboardCaptchaError`）/ 4xx は throw」。verify 側ラッパ（`fetchShopAddressSafely`）が try/catch で握りつぶし `shopAddress=null` とし、verify の `ok` は `false` にしない（住所はオプショナル。店舗ID・店舗名の解決には影響させない）。
 - **空欄補完（空のときだけ）**: 保存（新規連携 `saveSalonboardShop` / 再検証 `updateShop`）の **同一トランザクション内**で `shopsRepo.fillAddressIfEmpty(shopId, shopAddress)` を呼ぶ。`shop_address = COALESCE(NULLIF(BTRIM(shops.shop_address), ''), :新規)` で **空（NULL/空文字/空白のみ）のときだけ**スクレイピング住所をセットし、**既存の実値（運営・サロンの手動編集を含む）は上書きしない**。スクレイピング住所が `null`/空白のときは no-op（変更なし）。保存/一覧レスポンス（`toShopResponse` / `GET /admin/shops`）に `shopAddress` を含む（機微情報は従来どおり返さない）。
 - **取り込み（recurring import）には差し込まない**: 住所取得は連携の verify/保存時のみ。日次バッチ（`salonboard-import.service`）には追加しない（住所はほぼ不変で、毎回取得するとバッチ時間・失敗面が増える。空のときだけ補完なので再検証で随時埋まる）。
@@ -388,8 +440,12 @@ non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunctio
 - `DELETE /admin/shops/:id` — 店舗削除（**論理削除**＝`deletedAt`。`shop_integrations`・店舗単位認証情報のみ物理削除。
   `cancellations`/`external_import_logs` の `shop_id` は保持され店舗名/住所は JOIN で解決し続ける）。連携単位 `company`
   は 4xx 拒否（クロール由来）。
-- `POST /admin/salonboard/shop-verify` `{applicationId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
-  店舗一覧は返さない・会社アカウント/取得不可はエラー）。
+- `POST /admin/salonboard/shop-verify` `{applicationId?, shopId?, loginId, password}` — 店舗単位ログイン検証のみ（単一店舗自動取得・
+  店舗一覧は返さない・会社アカウント/取得不可はエラー）。GTSS-890 で `applicationId` を**実際に使用**するようになり
+  （連携単位の確定状態による文言の出し分け・救済判定）、任意の**対象店舗 ID `shopId`** を追加した（店舗編集からの
+  再検証でのみ管理画面が送る。作成では送らない＝救済対象外）。レスポンス形式は不変。
+  **保存経路（`POST /admin/shops` / `PUT /admin/shops/:id`）の内部再検証では body の識別子を使わず、サーバ側で解決した
+  会社 ID（引数 / `shops.applicationId`）とパスの店舗 ID を渡す**（マスアサインメント防止）。ステータス・形式は不変（400）。
 - `PUT /admin/applications/:applicationId/integration-unit?source=salonboard` `{unit}` — 連携単位の設定。lock 済みは 4xx
   （同一単位の再送は冪等成功）。lock は `external_integrations.linked` または `shop_integrations.linked` から導出。
 - `GET /admin/salonboard/integration/:applicationId` — レスポンスに `unit`/`unitLocked` を追加。
@@ -441,5 +497,24 @@ SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解�
   lock の `external_integrations.existsLinked OR shop_integrations.anyLinked` 導出、サロンポータル `/shops` CRUD
   （自社スコープ・連携情報を返さない）、手動作成の `shopId` 解決＋店舗名/住所スナップショット・旧 `shopName` 形式の 400、
   送信時の店舗名/住所解決順、店舗削除の連鎖（CASCADE / SET NULL）、Migration 0012 の backfill 値保全。
+  **GTSS-890 追加/更新**（連携単位 × ログイン種別のミスマッチ）:
+  - unit `salonboard-parser`: `detectAccountUnit`（会社 fixture=company / 単一店舗 fixture=shop / 店舗トップ着地
+    HTML=shop / 空・想定外 HTML=null / 店舗一覧1件＋hidden STORE_ID の競合は company 優先）。
+  - unit `salonboard-shop-verify`: `decideShopVerify` の「件数（0/1/2以上）× 実効単位 × 一致リンク有無」網羅、
+    店舗1件が会社アカウント扱いになること（会社/対象店舗の指定が無い検証では救済しない）。
+    **1件パスの住所スクレイピングテストは救済成立ケースの e2e へ移設**（DB シードが要るため）。
+  - unit `salonboard-verify-retry`: retry の成功ケースを店舗1件 → 単一店舗アカウントの着地 HTML へ変更。
+  - e2e `salonboard-store`: 会社アカウント文言（未確定／lock 済みの出し分け）、店舗1件での新規作成拒否と
+    DB 無変更、救済成立（ヘア=`enterStore` / キレイ=`enterKireiStore` → 住所取得）、不一致・未連携リンク・
+    別店舗/別会社/別 source・2件以上での非救済、評価順（店舗名が空でも会社アカウント文言）。
+  - e2e `salonboard-integration`: 会社単位 verify の 0 件分岐（単一店舗検出→単位変更を促す文言 / 判定不能→従来文言）、
+    会社単位 save での拒否と連携単位設定の非更新、店舗1件の会社アカウントは会社単位で成功。
+  - 管理画面（別リポジトリ）: unit `StoreForm`（サーバ文言表示・保存非活性・入力保持・編集時のみ `shopId` 送信）/
+    `SalonboardIntegration`（サーバ文言表示・確認テーブル非描画・0件ガードの中立文言）、Playwright
+    `salonboard-integration`（店舗フォームのエラー→閉じる→会社単位へ切替）/ `company-detail-context`
+    （会社単位パネルのエラー→店舗単位へ切替）。**文言アサートは `role="alert"` にスコープを絞る**。
+  - **エラー文言はテスト側の独立したリテラルで検証する**（実装定数を import すると、誤った文言に変わっても
+    実装とテストが同時に変わり AC が実質何も検証しなくなる）。
 - fixture（`src/__tests__/fixtures/salonboard/`）は実 HTTP 採取レスポンスを**PII マスクして**作成（生 PII は非コミット）。
   #23 で `group-top-single-store.html`（単一店舗の groupTop システムエラー）/ `store-top-single.html`（店舗TOP）を追加。
+  GTSS-890 は新規 fixture を追加せず、既存 fixture の再利用＋テスト内で組み立てた HTML（店舗1件の会社アカウント等）で賄う。
