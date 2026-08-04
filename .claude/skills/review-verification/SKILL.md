@@ -54,6 +54,10 @@ JSX レンダリング層・親子コンポーネント・middleware チェー�
    - 該当エンドポイント単独に validation がなくても、共通スキーマでカバーされている可能性
 4. **Express 認可 / ACL**
    - `passport` / 独自認可ミドルウェア / Parse ACL の適用有無を確認
+5. **認可カバレッジ（cancel-billing-service-api は `.claude/skills/authz/checklist.md` 参照）**
+   - 「認可/権限チェックが欠けている」「状態遷移ロックがバイパスされる」類の指摘は、**同一リソースの全ルートを grep して横並びで**確認してから確定する（`grep -nE "app\.(get|post|put|delete)\(|requireAdmin|requireAuth" src/handlers/<resource>.handler.ts`）。
+   - 状態遷移ロックの指摘は、状態を変えうる**全経路**（`/status` 以外の専用ルート・webhook）を `grep "status: APPLICATION_STATUS\|\.update(.*status"` で洗い出してから「ロック済み/未達」を判定する。
+   - serializer の機微フィールド漏洩の指摘は、その serializer を返す全エンドポイントの認可と、公開エンドポイントのレスポンス実体を裏取りする。
 
 ### Rails（Controller / Service / Model）— 他リポジトリから流用される場合
 

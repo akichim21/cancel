@@ -32,6 +32,9 @@ batch Lambda は `event.action` で処理を振り分ける（未知 action は�
 |---|---|---|
 | `purge-expired-backups` | `{ "action": "purge-expired-backups" }` | EventBridge Scheduler（毎月3日） |
 | `restore` | `{ "action": "restore", "applicationId": "app_xxx" }` | 手動 `aws lambda invoke` |
+| `salonboard-import` | `{ "action": "salonboard-import" }` | EventBridge Scheduler（毎日 JST 0:10）/ API から非同期委譲 |
+| `run-monthly-payouts` | `{ "action": "run-monthly-payouts" }` | EventBridge Scheduler（毎日 JST 6:00） |
+| `send-billing-reminders` | `{ "action": "send-billing-reminders" }` | EventBridge Scheduler（毎日 **JST 12:00 正午**・GTSS-886） |
 
 ## 運用手順
 
@@ -96,6 +99,47 @@ aws lambda invoke \
   **認証情報復号の KMS 権限**（`kms:Encrypt/Decrypt` を単一鍵 ARN に限定）+ 環境変数 `CREDENTIALS_KMS_KEY_ID` が必要。
   共有ロール（`cancel-billing-lambda-role`）に付与すること。VPC 内実行時は egress 経路（NAT 等）を要確認。
 - 詳細: `docs/tech/salonboard-import.md`。
+
+## 自動リマインド送信（`send-billing-reminders`・GTSS-886）
+
+`src/batch.ts` の `case 'send-billing-reminders'` が `runBillingReminders({ now })`
+（`src/services/billing-reminder.service.ts`）を起動する。未払い（請求中・初回送信記録あり・期日内）の
+キャンセル請求へ、初回送信日から 7 日目に 2 通目・14 日目に 3 通目のリマインドを初回と同じ通知方法で送る。
+業務仕様（法的建付け・回判定・文面）は `docs/product/cancellation-flow.md`「自動リマインド送信」を参照。
+
+- **スケジュール**: EventBridge Scheduler `cron(0 12 * * ? *)` + `schedule_expression_timezone="Asia/Tokyo"`
+  （毎日正午）。infra は `~/infra/cancel-billing-service-infra`（`batch_execution` に応じ Lambda invoke /
+  ECS RunTask。ECS 経路はタスク定義 family `cancel-billing-batch-{env}-reminders`）。
+- **夜間ガード**: 実行時刻が JST 21:00〜翌 8:00 なら送信せず終了（`skipped:'night_guard'`）。
+- **冪等**: `cancellation_notifications` の UNIQUE `(cancellation_id, round, channel)` ＋ 回単位 claim
+  （processing 先行 insert → 配信 → finalize）。タスク丸ごと再実行・多重起動が安全。回単位判定のため
+  片チャネルの記録が残った回は残チャネルも再送しない。
+- **依存**: SES（メール）+ Twilio（SMS）を使うため分岐内で `initClients()` を呼ぶ。
+  **Lambda 経路・ECS 経路の両方**に `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER`
+  または `TWILIO_MESSAGING_SERVICE_SID` と、`API_BASE_URL`（/pay 短縮 URL 生成）の注入が必要:
+  - Lambda（**prod の定期バッチは現在こちらで稼働**）: `deploy-batch.sh`。`update-function-configuration
+    --environment` は**全置換**のため、スクリプトの env JSON に含めないとデプロイのたびに消える。
+    `API_BASE_URL` は環境名から出し分ける（prod=`https://api.cancel.co.jp` / それ以外=`https://dev.api.cancel.co.jp`）。
+  - ECS（`deploy-batch-ecs.sh`）: 同じ env を task definition へ注入する。`TWILIO_AUTH_TOKEN` のみ
+    実秘密のため environment ではなく SSM（ECS secrets = `valueFrom`）経由。
+  - 設定漏れは**静かに SMS が全件失敗する**（仕様上「送信失敗のアラート・失敗一覧・絞り込みを設けない」ため
+    誰も気づけない）。Lambda 側（`deploy-batch.sh`）は Twilio 認証情報が欠けていればデプロイ前ガードで中断する。
+  - **ECS 経路の未完了事項（GTSS-886 TODO）**: batch イメージの CodeBuild（`cancel-batch-image-<env>`）には
+    まだ `TWILIO_*` が注入されていない（infra の `plain_env_vars` 未追加）。そのため `deploy-batch-ecs.sh` は
+    CI では中断せず警告に留めている（ここで落とすと develop / main push のたびに batch イメージのビルドが
+    止まり、サロンボード取り込みのデプロイまで巻き込むため）。**ECS 経路でリマインドを動かす前に**
+    infra へ `TWILIO_ACCOUNT_SID` / `TWILIO_MESSAGING_SERVICE_SID` を追加し、スクリプトの警告を
+    ハードガードへ戻すこと（`buildspec-batch.yml` の env 契約も併せて更新）。
+- **ログ**: 実行ごとに `[billing-reminders] summary:`（対象件数・回別・チャネル別成否）を構造化出力。
+
+```bash
+# 手動起動（dev）。夜間ガード時間帯は送信されない点に注意。
+aws lambda invoke \
+  --function-name cancel-billing-service-batch-dev \
+  --payload '{"action":"send-billing-reminders"}' \
+  --cli-binary-format raw-in-base64-out \
+  --profile cancel-billing-service-dev /dev/stdout
+```
 
 ## 関連
 

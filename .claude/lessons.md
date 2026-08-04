@@ -8,6 +8,7 @@
 - `.claude/skills/vitest/lesson.md` — Vitest関連
 - `.claude/skills/playwright/lesson.md` — Playwright E2E関連
 - `.claude/skills/issue/lesson.md` — Issue仕様記述関連
+- `.claude/skills/authz/lesson.md` — 認可関連（認証ガード/状態遷移ロックの多層防御/レスポンス露出/マスアサインメント）
 
 ## 全般
 
@@ -92,6 +93,7 @@
 - **問題**: `serializeApplication` が `{ ...item }` で全フィールドを透過するため、スキーマに `agentCode`（代理店コード）列を足しただけで、`requireAdmin` の無い `GET /applications` / `GET /applications/:id` のレスポンスに機微フィールドが乗った（GTSS-836。既存の認可ギャップが顕在化）。これらの GET は以前から email/phone 等の PII も無認可で返していた。
 - **正しい対応**: spread passthrough な serializer / repository（`{ ...item }` や `getTableColumns` 由来の全列出し入れ）を使うエンティティに機微フィールドを追加するときは、**その serializer を返す全エンドポイントの認可を確認する**。サロン/顧客向けと admin 向けで露出が異なるなら、(a) エンドポイントに `requireAdmin` を付ける、(b) 公開向けは別 serializer で機微フィールドを除外する。「画面に出さない」だけでは API 契約レベルの漏洩は塞げない。
 - **検証**: 新フィールドを返し得る全 GET を grep し、各々の認可ガード（`requireAdmin`/`requireAuth`/無認可）と消費者（フロント側 grep）を確認する。テストは「非admin/未認証応答に機微フィールドが出ない（401/403）／admin応答には出る」を固定する。
+- **関連**: 認可全般（sibling ルートの requireAdmin 付け忘れ・状態遷移ロックの多層防御・マスアサインメント含む）は `.claude/skills/authz/`（SKILL.md / checklist.md / lesson.md）に集約。GTSS-842 では `POST /applications/:id/approve` が `requireAdmin`・状態検査とも無く、`/status` に入れた `unverified` ロックを別経路でバイパスできた（serializer 漏洩と同根の「画面/片経路だけでは塞げない」事例）。
 
 ### サブエージェントの cross-file 指摘は必ず再検証する
 - **事例**: hotel PR #1938 で submit ボタン非表示ロジックを親コンポーネント (`BookingForm.tsx`) だけ読んで「消えない」と誤指摘し、そのまま行コメント投稿してしまった。

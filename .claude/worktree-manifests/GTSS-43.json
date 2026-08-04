@@ -1,0 +1,33 @@
+{
+  "issueNumber": 43,
+  "branchName": "GTSS-852",
+  "baseBranchOverride": "develop",
+  "worktreeDir": "GTSS-852",
+  "slot": 1,
+  "ports": {
+    "api": 1339,
+    "admin": 3001,
+    "userPortal": 5174,
+    "lp": 5274
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-852",
+      "branch": "GTSS-852",
+      "baseBranch": "develop"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service/.worktrees/GTSS-852",
+      "branch": "GTSS-852",
+      "baseBranch": "develop"
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

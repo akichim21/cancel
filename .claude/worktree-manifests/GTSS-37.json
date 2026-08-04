@@ -1,0 +1,47 @@
+{
+  "issueNumber": 37,
+  "branchName": "GTSS-859",
+  "baseBranchOverride": "GTSS-854-payout-safeguards,GTSS-854-payout-daily-cron(infra)",
+  "worktreeDir": "GTSS-859",
+  "slot": 5,
+  "note": "CI/CD epic (GTSS-859). Per-repo base branches resolved from each repo's active branch: api=GTSS-854-payout-safeguards, user=GTSS-817, admin=GTSS-842, lp=GTSS-842, infra=GTSS-854-payout-daily-cron. Slot probe wrapped (all 10 nominal slots have manifests, mostly stale); ports unused because this issue runs no local dev servers or Playwright (all such ACs are CI/human observation).",
+  "ports": {
+    "api": 1343,
+    "admin": 3005,
+    "userPortal": 5178,
+    "lp": 5278
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-859",
+      "branch": "GTSS-859",
+      "baseBranch": "GTSS-854-payout-safeguards"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service/.worktrees/GTSS-859",
+      "branch": "GTSS-859",
+      "baseBranch": "GTSS-817"
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/GTSS-859",
+      "branch": "GTSS-859",
+      "baseBranch": "GTSS-842"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-859",
+      "branch": "GTSS-859",
+      "baseBranch": "GTSS-842"
+    },
+    "cancel-billing-service-infra": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/infra/cancel-billing-service-infra/.worktrees/GTSS-859",
+      "branch": "GTSS-859",
+      "baseBranch": "GTSS-854-payout-daily-cron",
+      "note": "Separate repo at ~/infra, not under ~/cancel; outside the standard 4-repo manifest."
+    }
+  }
+}

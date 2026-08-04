@@ -68,7 +68,9 @@ EventBridge Scheduler ──(RunTask + task定義: action別 command)──> ECS
 イメージは **単一**（`playwright-core` は依存ゼロ・自己完結なので runtime ステージへコピー、Chromium は
 `playwright-core install --with-deps chromium` で導入）。アクションは **タスク定義の `command` で出し分ける**
 （EventBridge Scheduler の ECS ターゲットは container command override を渡せないため、アクション別に
-タスク定義 family を分ける — `*-payouts` / `*-import`）。秘密（`STRIPE_SECRET_KEY`/`AURORA_*`/`CREDENTIALS_KMS_KEY_ID`
+タスク定義 family を分ける — `*-payouts` / `*-import` / `*-reminders`（GTSS-886 自動リマインド。正午 cron）。
+`*-reminders` は SES/Twilio を使うため `TWILIO_ACCOUNT_SID` 等の env と `TWILIO_AUTH_TOKEN` の
+secrets(valueFrom=SSM)、/pay 短縮 URL 用の `API_BASE_URL` の注入が必要）。秘密（`STRIPE_SECRET_KEY`/`AURORA_*`/`CREDENTIALS_KMS_KEY_ID`
 等）は **イメージに焼かず** タスク定義の environment として注入する。
 
 ## 実行環境（裏取り済み）

@@ -16,10 +16,10 @@ EARS形式を参考ガイドとして記載する。各ACの直下にインデ�
 
 | 対象アプリ | テストツール | 備考 |
 |-----------|----------|------|
-| cancel-billing-service-api | Jest | unit + ハンドラ統合（HTTPレベル）E2E相当 |
-| cancel-billing-service | Vitest(未整備) / Playwright | サロンポータル Web UI E2E |
-| cancel-billing-service-admin | Vitest(未整備) / Playwright | 管理画面 Web UI E2E |
-| cancel-billing-service-lp | Vitest(未整備) / Playwright | LP・申請フォーム Web UI E2E |
+| cancel-billing-service-api | Vitest | unit + Hono `app.request()` によるインプロセス E2E（実 Postgres） |
+| cancel-billing-service | Vitest / Playwright | サロンポータル。コンポーネント単体 + Web UI E2E（いずれも導入済み） |
+| cancel-billing-service-admin | Vitest / Playwright | 管理画面。コンポーネント単体 + Web UI E2E（いずれも導入済み） |
+| cancel-billing-service-lp | Vitest | LP・申請フォームのコンポーネント単体（`src/**/__tests__`）。Playwright は未導入 |
 
 ## テンプレート
 

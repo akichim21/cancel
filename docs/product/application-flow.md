@@ -74,11 +74,16 @@ LP申込で入力ミス・他人のメールアドレスでの申込を弾くた
     使わない（完了の案内は認証完了画面側の役割）。申請ID・入力情報は表示せず、URL は固定パス
     （クエリ・ハッシュに個人情報・申請ID・代理店コードを含めない）。
   - 表示専用でサーバー通信を行わない（直接アクセス・再読み込みでも二重登録は起きない）。
-  - **noindex はこのページのみ**に適用する（`meta[name="robots"]` = `noindex, nofollow`）。LP は全ルートが
-    同一 HTML を共有する SPA のため、LP 本体・公開ページ（利用規約／プライバシーポリシー／特商法表記）へ
-    波及させない。適用は SEO を単一管理する `cancel-billing-service-lp/src/seo.js` の `verify-email-sent`
-    エントリが担い（title も同エントリが設定）、ページコンポーネント側では head を触らない（GTSS-887 で
-    ページ別 title / description / canonical / noindex を `seo.js` へ集約したため）。
+  - **noindex**（`meta[name="robots"]` = `noindex, nofollow`）を適用する。本ページのほか、
+    メール認証・Stripe 登録・決済結果系の全 7 ルート（`/verify-email`・`/verify-email-sent`・
+    `/stripe-success`・`/stripe-refresh`・`/payment-success`(+`/payment-complete`)・`/payment-cancel`）と
+    未知パスが noindex 対象（`noindex, nofollow` + 固有 title は本ページのみ。他はサイト名 title + `noindex`）。
+    公開ページ（LP 本体／利用規約／プライバシーポリシー／特商法表記）へは波及させない。
+    適用方式は**初期 HTML（ビルド時プリレンダ #56）+ JS の二重適用**: SEO 値の単一ソースは
+    `cancel-billing-service-lp/src/seo.js` の `PAGE_META` で、ビルド時に `vite-plugin-seo-prerender.js` が
+    ページ別初期 HTML の head へ焼き込み、JS レンダリング時に同じ値を冪等に再適用する。
+    ページコンポーネント側では head を触らない（GTSS-887 で `seo.js` へ集約）。
+    存在しない URL は CloudFront が HTTP 404 + 専用 404 ページ（noindex・アプリ非起動）を返す（#56）。
 - **認証メール**（申込者宛）: 宛名（事業者名）＋認証URL（`{LPベースURL}/verify-email?token=...`）＋
   有効期限（24時間）の案内。送信は本番=SMTP / それ以外=SES、送信元 `info@cancel.co.jp`。
 - **認証画面**（`/verify-email`、`cancel-billing-service-lp/src/components/EmailVerify.jsx`）: URL の `token` を

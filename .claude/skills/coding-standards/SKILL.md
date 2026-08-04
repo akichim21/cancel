@@ -20,6 +20,14 @@ description: コーディング規約・セキュリティ・コード参照の�
 - SQLインジェクション
 - その他OWASP Top 10の脆弱性
 
+### 認可（Authorization）
+
+API のエンドポイント・serializer・状態遷移ロックを追加/改修する時は `.claude/skills/authz/SKILL.md` のチェックリストに従う。要点:
+- 同一リソースの破壊的/状態変更/PII 露出ルートに認可ガード（`requireAdmin`/`requireAuth`）を**揃える**（sibling の付け忘れに注意）
+- 状態遷移ロックは状態を変えうる**全経路**にサーバ側ガードを置く（UI で隠すだけでは不十分）
+- spread passthrough な serializer に機微列を足したら、それを返す全エンドポイントの露出を確認（公開向けは pick で除外）
+- 入力は allow-list で保存（`.passthrough()` ＋ `{ ...input }` 保存はマスアサインメント）
+
 ## コード参照の記法
 
 ファイルやコードの場所を参照する際は、マークダウンリンク形式を使用:

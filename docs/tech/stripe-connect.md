@@ -51,8 +51,32 @@ Stripe ダッシュボードで上記イベントを Webhook エンドポイン�
 1. 管理画面でキャンセル請求登録
 2. API が Stripe Checkout Session を作成（**direct charge**。`checkout.sessions.create(params, { stripeAccount })`
    でサロンの連結アカウント上に発生させ、GTSS の取り分は `application_fee_amount` で受け取る）
-3. 顧客に Checkout URL をメール/SMS 送信
+3. 顧客に **`{API}/pay/{請求ID}` の短縮 URL** をメール/SMS 送信（GTSS-886 でメールも短縮 URL に統一。
+   生の Checkout URL は本文に載せない）
 4. 顧客が決済 → `checkout.session.completed` Webhook で完了処理
+
+### Checkout Session の失効と /pay ゲート・再発行（GTSS-886）
+
+**Checkout Session は作成から最大 24 時間で失効する**（外部仕様）。従来は生 URL を配っていたため実質
+24 時間しか支払えていなかった。現在は次の建付けで**支払期日（`due_date`）まで**の支払い可能性を担保する:
+
+- **セッション生成は共通ビルダー `src/services/checkout-session.service.ts` に集約**。初回 2 経路
+  （`createInvoice` / `dispatchPayment`）と /pay の再発行経路の 3 経路が共用し、direct charge の手数料
+  （`application_fee_amount`）・領収書 SUMMARY（発行者名＋T番号）・日本語 Customer・`receipt_email` を含む
+  全パラメータのドリフトを構造的に防ぐ。**Checkout まわりを触るときは必ずこのビルダーを経由すること**
+  （最小パラメータでの再生成は手数料取り漏れ・英語領収書化の静かな退行になる）。
+  ※ `statement_descriptor_suffix` のみ経路別（送信ボタン経路='Cancel Fee' / createInvoice=なし）の
+  従来挙動を維持（オプション引数）。
+- **`expires_at`**: 「作成から 24h」と「支払期日 23:59:59 JST」の早い方にクランプ。外部仕様の最小 30 分
+  制約により、期日末尾 30 分以内の発行では最大 30 分の食み出しを許容（その決済は通常どおり支払済にする）。
+- **`client_reference_id`**: 請求 ID を全セッションに設定。webhook はセッション ID 突合が外れた場合に
+  これでフォールバック突合する（/pay 再発行の同時アクセス競合で保存外セッションで決済されても着金を拾う）。
+- **/pay ゲート**: 認証不要 GET。状態（請求中のみ）と期日（JST 当日まで）を検査し、保存済みセッションを
+  `sessions.retrieve` で確認 → open ならそのまま 302 / expired なら共通ビルダーで再発行（保存は
+  `stripe_session_id` の条件付き更新＝先勝ち）/ 不可状態は案内 HTML。**per-request 予算必須**
+  （`timeout: 8000, maxNetworkRetries: 0`。SDK 既定 80s は API Gateway 29s を超える）。
+- **取消時の失効**: 請求の取消（canceled 遷移）時に `sessions.expire` をベストエフォートで呼ぶ
+  （失敗しても取消は成立させる）。
 
 ### Checkout のどのフィールドがどこに出るか（GTSS-851 / #44）
 

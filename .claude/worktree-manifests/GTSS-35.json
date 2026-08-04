@@ -1,0 +1,36 @@
+{
+  "issueNumber": 35,
+  "branchName": "GTSS-854-sqs",
+  "baseBranchOverride": "GTSS-854-payout-safeguards",
+  "worktreeDir": "GTSS-854-sqs",
+  "slot": 6,
+  "ports": {
+    "api": 1344,
+    "admin": 3006,
+    "userPortal": 5179,
+    "lp": 5279
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-854-sqs",
+      "branch": "GTSS-854-sqs",
+      "baseBranch": "GTSS-854-payout-safeguards"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  },
+  "infra": {
+    "repo": "/Users/aki/infra/cancel-billing-service-infra",
+    "branch": "GTSS-854-sqs",
+    "baseBranch": "GTSS-854-payout-daily-cron",
+    "note": "infra repo is not managed by the worktree system; a branch is created in-place"
+  }
+}

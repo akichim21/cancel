@@ -1,0 +1,38 @@
+{
+  "issueNumber": 56,
+  "branchName": "GTSS-884",
+  "baseBranchOverride": null,
+  "worktreeDir": "GTSS-884",
+  "slot": 5,
+  "slotNote": "全スロット(0-9)がlive manifestで占有中のためraw slot 5を再利用。共有相手はGTSS-37(GTSS-859 CI/CD epic)のみで、本IssueはVitest/ビルド中心でdev server常時起動なしのため競合リスク実質ゼロ",
+  "ports": {
+    "api": 1343,
+    "admin": 3005,
+    "userPortal": 5178,
+    "lp": 5278
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-884",
+      "branch": "GTSS-884",
+      "baseBranch": "main"
+    },
+    "infra/cancel-billing-service-infra": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/infra/cancel-billing-service-infra/.worktrees/GTSS-884",
+      "branch": "GTSS-884",
+      "baseBranch": "main",
+      "note": "REQ-2/REQ-4 (custom_error_response パラメータ化・X-Robots-Tag・prod import 定義)"
+    }
+  }
+}

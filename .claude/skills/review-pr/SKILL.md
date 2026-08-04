@@ -135,6 +135,10 @@ git log --oneline {baseBranch}..{toBranch} > /tmp/review-log-{短縮名}.txt
 **検証ルール**: `.claude/skills/review-verification/SKILL.md` の cross-file 検証チェックリストに従うこと。
 特に UI 挙動・認可・バリデーション・コールバック・委譲に関する指摘は、呼び出しチェーン全体を
 grep/Read で追跡してから返すこと。未検証の指摘には `[未検証]` プレフィックスを付けること。
+**認可（API のエンドポイント/serializer/状態遷移ロックを含む差分の場合）**: `.claude/skills/authz/checklist.md`
+の4観点（ルート認可カバレッジ / 状態遷移ロックの多層防御 / レスポンス露出 / マスアサインメント）で確認すること。
+特に「同一リソースの sibling ルートの requireAdmin 付け忘れ」「状態遷移ロックが /status 以外の経路を素通り」
+「公開エンドポイントのレスポンスへの機微フィールド漏洩」を grep して横並びで裏取りすること。
 ---
 ```
 

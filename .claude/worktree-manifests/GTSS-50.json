@@ -1,0 +1,32 @@
+{
+  "issueNumber": 50,
+  "branchName": "GTSS-887",
+  "baseBranchOverride": null,
+  "worktreeDir": "GTSS-887",
+  "slot": 3,
+  "slotNote": "全スロット使用中のため、closed Issue (#2) のみが使用する slot 3 を再利用",
+  "ports": {
+    "api": 1341,
+    "admin": 3003,
+    "userPortal": 5176,
+    "lp": 5276
+  },
+  "portConfigNote": "LP の .env.development は git 追跡ファイルのため VITE_API_URL の追記をスキップ（本 Issue は API 連携不要・jsdom Vitest のみ）。dev サーバー起動時は --port 5276 を指定する",
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-887",
+      "branch": "GTSS-887",
+      "baseBranch": "main"
+    }
+  }
+}

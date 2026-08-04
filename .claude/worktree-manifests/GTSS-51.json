@@ -1,0 +1,30 @@
+{
+  "issueNumber": 51,
+  "branchName": "GTSS-883",
+  "baseBranchOverride": null,
+  "worktreeDir": "GTSS-883",
+  "slot": 8,
+  "ports": {
+    "api": 1346,
+    "admin": 3008,
+    "userPortal": 5181,
+    "lp": 5281
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-883",
+      "branch": "GTSS-883",
+      "baseBranch": "main"
+    }
+  }
+}

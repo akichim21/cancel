@@ -37,11 +37,38 @@ cd cancel-billing-service-lp && ./deploy.sh dev         # / prod
 
 ### S3 + CloudFront
 
-| アプリ | dev S3 / CloudFront | prod S3 / CloudFront |
+dev は GTSS-13 で dev アカウント(818059182115)へ移設済み（`*-dev-145887419870` /
+`E1OUC1XEZOT7LN` 等の prod アカウント同居の旧資源は撤去対象）。
+
+| アプリ | dev S3 / CloudFront（dev アカウント） | prod S3 / CloudFront |
 |---|---|---|
-| LP | `cancel-billing-lp-dev-145887419870` / `E1OUC1XEZOT7LN` | `cancel-billing-lp-prod-app` / `E3AU8H3BJJK35A` |
-| サロンポータル | `cancel-billing-user-web-dev-145887419870` / `E71P95BIB50NW` | `cancel-billing-user-portal-prod-app` / `EKU0PRCYVJUIZ` |
-| 管理画面 | `cancel-billing-admin-dev-145887419870` / `E15K6M6VG5BSZ8` | `cancel-billing-admin-prod-app` / `EZ2JYIS8UOYRB` |
+| LP | `cancel-billing-lp-dev-818059182115` / `E3DBTIIV5TB3IP` | `cancel-billing-lp-prod-app` / `E3AU8H3BJJK35A` |
+| サロンポータル | `cancel-billing-user-web-dev-818059182115` / `E3UO0Z1W80IDPV` | `cancel-billing-user-portal-prod-app` / `EKU0PRCYVJUIZ` |
+| 管理画面 | `cancel-billing-admin-dev-818059182115` / `E1V9B22113545B` | `cancel-billing-admin-prod-app` / `EZ2JYIS8UOYRB` |
+
+dev の 3 サイトは infra リポジトリ `cancel-billing-service-infra/dev`（`modules/static-site`）が
+terraform 管理。**prod LP の CloudFront `E3AU8H3BJJK35A` + S3 `cancel-billing-lp-prod-app` も
+#56 で `prod/static-site-lp.tf`（prod 専用定義 + import ブロック）により terraform 管理化**
+（実構成が dev 共有モジュールと乖離: S3 REST オリジン・OAI なし・未使用 S3-Admin オリジン同居・
+403/404 両エラーマッピング）。prod のサロンポータル / 管理画面の CloudFront は terraform 未管理のまま。
+
+### LP デプロイ成果物（#56 / SSG）
+
+LP のビルドは全 URL 共通 HTML ではなく、**既知 11 ルートのページ別 HTML（トップ = index.html +
+拡張子なし 10 オブジェクト）+ 404.html + モード別 robots.txt** を生成する
+（`cancel-billing-service-lp/vite-plugin-seo-prerender.js`。詳細は
+`docs/cancel-billing-service-lp/README.md`）。deploy.sh は「除外なし `s3 sync --delete` →
+拡張子なし 10 ファイルを `Content-Type: text/html; charset=utf-8` で個別 `s3 cp` 上書き」の
+2 段構え。存在しない URL は CloudFront custom error response が HTTP 404 + /404.html を返す
+（dev: 404→404。prod: S3 REST オリジンのため 403/404 の両方→404。
+user portal / admin は SPA のため 404→200 フォールバックを維持）。
+dev の LP 配信には `X-Robots-Tag: noindex` レスポンスヘッダを付与（prod には付与しない）。
+
+**prod LP の terraform 適用手順（#56 / 人間が prod プロファイルで実施）**:
+main マージによる prod デプロイ（404.html 配置）後に、`prod/static-site-lp.tf` ヘッダ記載の
+手順どおり `terraform plan -var lp_enable_404_response=false`（import 差分ゼロ確認）→
+**lp 4 リソースへの `-target` 付き apply**（403/404→404 変更のみ）→ plan 差分ゼロ確認。
+prod state には無関係の既存 drift（batch スケジュール等）があるため **-target なしの全体 apply は禁止**。
 
 ### DynamoDB（ap-northeast-1）
 

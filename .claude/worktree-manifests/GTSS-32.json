@@ -1,0 +1,31 @@
+{
+  "issueNumber": 32,
+  "branchName": "GTSS-854",
+  "baseBranchOverride": "GTSS-842",
+  "worktreeDir": "GTSS-854",
+  "slot": 4,
+  "note": "#32 and #33 are implemented together on the single branch GTSS-854 (#33 supersedes #32: monthly -> manual). See GTSS-33.json (same worktree).",
+  "ports": {
+    "api": 1342,
+    "admin": 3004,
+    "userPortal": 5177,
+    "lp": 5277
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-854",
+      "branch": "GTSS-854",
+      "baseBranch": "GTSS-842"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}
