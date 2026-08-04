@@ -27,6 +27,12 @@ Issue の作成・更新・実装開始・検証時に使用する共通ガイ�
 | [writing-design.md](./writing-design.md) | 実装設計（ファイル変更一覧）の書き方 |
 | [writing-acceptance.md](./writing-acceptance.md) | 受け入れ条件（AC / テスト担保方針 / Docs Updates）の書き方 |
 
+## レビュー手順
+
+| ガイド | 内容 |
+|--------|------|
+| [running-codex.md](./running-codex.md) | Codex レビューの回し方（issue-create / issue-update / issue-manually-update 共通） |
+
 ## レビュー基準
 
 - [review-criteria.md](./review-criteria.md) — Issue 分析・レビュー時の観点チェックリスト

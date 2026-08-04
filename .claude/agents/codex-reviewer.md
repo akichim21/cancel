@@ -104,7 +104,10 @@ Codexには `--sandbox read-only` で書き込みを禁じ、追加調査は rea
 DIFF_CONTENT=$(cat {diffFile})
 LOG_CONTENT=$(cat {logFile})
 SHORT_NAME=$(basename {diffFile} | sed 's/review-diff-//; s/\.txt$//')
-OUTPUT_FILE=/tmp/codex-review-output-${SHORT_NAME}.txt
+# 出力先は実行ごとにユニークにする（固定パスにすると前回/別レビューの成果物を
+# 今回の結果として取り込む事故が起きる。数百KBあるため中身を読むまで気づけない）
+OUTPUT_FILE=/tmp/codex-review-output-${SHORT_NAME}-$(date +%Y%m%d%H%M%S).txt
+echo "OUTPUT_FILE=${OUTPUT_FILE}"
 
 cd {repoDir}
 

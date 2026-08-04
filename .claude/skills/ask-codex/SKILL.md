@@ -75,7 +75,9 @@ codex exec "Your question or task here" < /dev/null
    **stdoutをファイルにリダイレクト + stdinを/dev/nullに繋ぐこと。これを怠るとcodexがstdin待ちでhangする。**
    **`timeout` コマンドは絶対に付けないこと（NG）。** 外側から強制終了すると正常な長時間調査の途中結果を失う。codex自身の内部hard capに任せる。
 
-   codex exec {options} "{prompt}" > /tmp/codex-{task-name}.txt 2>&1 < /dev/null
+   **{出力先} は毎回ユニークなパスにすること（固定パス禁止）。** `/tmp/codex-{task-name}.txt` のような固定パスにすると前回や別タスクの成果物が残り、それを今回の結果として取り込む事故が起きる（実際に発生。数百KBあるため中身を読むまで取り違えに気づけない）。スクラッチパッド配下に `codex-{task-name}-{YYYYMMDDHHMMSS}.txt` の形で作る。
+
+   codex exec {options} "{prompt}" > {出力先} 2>&1 < /dev/null
 
 2. **同一ターン内で同期的に完了を待つ**: `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。返り値の status が completed でなければ、再度 `TaskOutput({task_id, block: true, timeout: 600000})` を呼ぶ。これを completed になるまで繰り返す（codexが20分かかってもこのループで待てる）。**待機中はターンを終了せず、最終メッセージも出さない。** `<task-notification>` の再呼び出しには頼らない（サブエージェントには届かない）。
    - Web 検索を 5-10 回連発するのは codex の正常動作。各検索 1-2 分 × 数回で 10〜20 分かかることがある。
@@ -84,8 +86,8 @@ codex exec "Your question or task here" < /dev/null
 3. completed 後、exit code を確認:
    - exit code 0 → 出力ファイルからCodexの最終レスポンスのみを抽出する:
 
-     LAST_LINE=$(grep -n "^codex" /tmp/codex-{task-name}.txt | tail -1 | cut -d: -f1)
-     awk "NR>=${LAST_LINE}" /tmp/codex-{task-name}.txt
+     LAST_LINE=$(grep -n "^codex" {出力先} | tail -1 | cut -d: -f1)
+     awk "NR>=${LAST_LINE}" {出力先}
 
    - 0 以外 → exit code と出力ファイル末尾 30 行を返す。
 
