@@ -96,12 +96,15 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
     実行環境のタイムゾーンで読み直さない）。来店時刻は `H:MM` / `HH:MM` を受理する（**ゼロ埋め非保証**）。
   - **サロンポータルの請求作成フォームには来店時刻の入力欄が無い**ため、手動作成の請求は**日付のみ**になる。
     実運用で時刻まで出るのはサロンボード取り込みの請求（API を直接叩いて `startTime` を渡した場合も出る）。
-  - ⚠️ **決済画面の品目説明欄・領収書は対象外**（従来どおり日付のみ）。「メール／SMS は分まで・決済画面は
-    日付まで」という**2 つの書式が併存する**（意図的な非対称。実装も別関数のまま）。
+  - ⚠️ **決済画面の品目説明欄は対象外**（従来どおり日付のみ）。**領収書には予約日・予約時刻とも出ない**
+    （領収書の SUMMARY は事業者名 + T 番号のみ。下記「出力先ごとの対応表」参照）。結果として
+    「メール／SMS は分まで・決済画面は日付まで・領収書は出さない」という**書式が併存する**
+    （意図的な非対称。実装も別関数のまま）。
   - 実装: `cancel-billing-service-api/src/utils/appointment-datetime.ts`（純関数）＋
-    `src/services/notification.service.ts`（4 テンプレートへ前置）。管理画面の文面再構成
-    （`cancel-billing-service-admin/src/utils/appointmentDatetime.ts`）と**対の二重実装**で、
-    片方だけ変更すると法的証跡の同一性が崩れる。
+    `src/services/notification.service.ts`（4 テンプレートへ前置）。**整形はこの 1 箇所だけが持つ。**
+    管理画面の文面再構成は同じ関数の戻り値を API レスポンス（`notificationAppointmentPrefix`）として
+    受け取り、`appointmentDate` / `startTime` から再導出しない（`notificationSalonName` と同じ方針。
+    フロントに二重実装を置くと書式や形式外値の扱いがドリフトして法的証跡の同一性が崩れるため）。
 - **決済リンク生成時に、連結アカウント上へ「言語＝日本語」の顧客情報（Stripe Customer）を作成して紐づける**
   （GTSS-850 #42）。Stripe の領収書メールを日本語テンプレートで送るための措置で、**顧客メールアドレスの
   登録有無に関わらず必ず作成する**（メールがあれば顧客情報にも設定する）。顧客情報の作成に失敗した場合は
@@ -229,8 +232,12 @@ claim（`processing` で先行 insert → 配信 → success/failed へ確定。
 場合はご容赦ください。」へ差し替えた確定文面（宛名は「{お客様名}様」スペースなし）。決済リンクは初回と同一の
 /pay 短縮 URL。**リマインド SMS の冒頭にも初回と同じ予約日時が入る**（GTSS-896。上記「2. 送信」参照）。
 
-**SMS 長**: **335 文字（5 セグメント）以内**を自動テストで検証する（GTSS-896 で 268 文字／4 セグメントから改定）。
-予約日時の差し込みで本文は 15〜18 文字増える。来店時刻を持つのはサロンボード取り込みの請求だけで、
+**SMS 長**: **想定条件（店舗名 40 字／担当 10 字／顧客 10 字）で 335 文字（5 セグメント）以内**であることを
+自動テストで検証する（GTSS-896 で 268 文字／4 セグメントから改定）。**サーバー側の文字数制限・切り詰めは
+無く**、入力欄は店舗名・担当者名・顧客名とも各 100 字まで許容するため、**これはハード上限ではない**
+（テストが置いている現実的な上限）。
+予約日時の差し込みで本文は 15〜18 文字増える。通常の UI 運用で来店時刻を持つのはサロンボード取り込みの
+請求だけ（API を直接叩けば手動作成でも `startTime` を設定できる）で、
 その請求 ID は `imp_` + UUID の **40 文字**（手動作成の `inv_` + エポックms は 17 文字）——
 **本文が長くなる側だけ ID も 23 文字長い**ため、想定最大（店舗名 40 字／担当 10 字／顧客 10 字）の
 リマインド SMS は **270 文字＝5 セグメント**になり旧上限を満たせない（dev は API ドメインが 4 文字長く 274 文字）。
@@ -306,6 +313,19 @@ claim（`processing` で先行 insert → 配信 → success/failed へ確定。
   （記録するのはテンプレート版のみ）は維持する。
 - 送信後に来店予定日・来店時刻を書き換える経路は現状無いため再構成のズレは生じない。将来これらを
   編集可能にする場合は証跡の同一性が崩れる点に注意すること。
+- **再送で配信できたら履歴の版は最新化される。** 決済失敗（`failed`）→ 運営が「送信前」へ巻き戻す →
+  再送、という経路はリリースを跨いで成立し得る。この場合**顧客に届くのは新しい版の本文**なので、
+  **配信できた（`success`）試行の版だけ**を `template_version` へ書く（`status` / `sentAt` は先勝ちのまま
+  ＝初回試行の実績）。**失敗した再送では版を書き換えない**（届いていない文面を「送信した文面」として
+  見せないため）。結果として `template_version` の意味は「**最後に配信できた文面の版**（一度も配信
+  できていなければ最初の試行の版）」になる。
+  なお 2 回目以降の**配信成否**が履歴に残らない点は GTSS-886 からの既知の非対称で、解消には
+  送信履歴へ試行連番を持たせるスキーマ変更が要る。
+- ⚠️ **予約日時の書式を変える新版を作る場合は、接頭辞の返し方も版別にすること。**
+  管理画面へ返す `notificationAppointmentPrefix` は**現行テンプレートの書式で解決した 1 値**なので、
+  同一請求内で版が混在し、かつ**版ごとに書式が違う**場合は表現できない（今の v1/v2 は「差し込む／
+  差し込まない」の違いだけなので 1 値で足りる）。書式自体を変える版を足すときは、版別の接頭辞解決か
+  送信時スナップショットの保存へ切り替える。
 
 ## 精算用CSVの出力（代理店コード・支払日列／支払日期間フィルタ）
 
@@ -380,8 +400,7 @@ CSVはクライアント側で生成し、画面の絞り込み結果（`filtere
 | `cancel-billing-service-api/src/repositories/cancellation-notifications.repository.ts` | 送信履歴（claim/finalize/集約） |
 | `cancel-billing-service-api/src/utils/jst-date.ts` | JST 暦日判定の集約（経過日数・期日境界・翌月末日・期限切れ導出） |
 | `cancel-billing-service-api/src/services/notification.service.ts` | 顧客宛メール／SMS の文面テンプレート・テンプレート版定数（`NOTIFICATION_TEMPLATE_VERSION`） |
-| `cancel-billing-service-api/src/utils/appointment-datetime.ts` | 本文へ差し込む予約日時の整形（GTSS-896。**admin の同名実装と対**） |
-| `cancel-billing-service-admin/src/utils/appointmentDatetime.ts` | 同上（証跡の再構成用。**API 側と対の二重実装。片方だけ変えない**） |
+| `cancel-billing-service-api/src/utils/appointment-datetime.ts` | 本文へ差し込む予約日時の整形（GTSS-896。**唯一の実装**。結果を `notificationAppointmentPrefix` として admin へ返す） |
 | `cancel-billing-service-admin/src/constants/cancellationNotifications.ts` | 送信履歴タイムライン・**テンプレート版別の文面再構成**（`SUPPORTED_TEMPLATE_VERSIONS`） |
 | `cancel-billing-service-admin/src/components/CancellationManagement.tsx` | 管理画面一覧・取り込み・送信・**店舗 select** |
 | `cancel-billing-service/src/components/InvoiceForm.tsx` / `InvoiceList.tsx` | サロン向け作成（店舗 select）・一覧・送信 |
