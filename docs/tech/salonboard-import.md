@@ -264,17 +264,65 @@ proxy 未設定時は直結）。全リクエストに `AbortSignal.timeout`（�
 （`[salonboard-import] transport=… chromium=… proxy=…`＝`describeTransport`。proxy は host:port のみで認証情報は出さない）。
 実プロキシでの実ログイン・実行頻度/CAPTCHA 頻度は人手確認（T-2/T-4/T-10/T-11）。
 
-### ログインの一過性失敗リトライ（residential 出口 IP のばらつき対策）
+### ログイン失敗の診断情報（GTSS-817-qa / REQ-1）
+
+`login()` は**失敗したときだけ** `SalonboardLoginResult.diagnostics` に診断情報を載せる（成功時は採取しない＝
+正常系のオーバーヘッドと情報量を増やさない）。これが無かった頃は「認証情報が違う」「Akamai に遮断された」
+「HTML 構造が変わった」「doLogin 応答が返ってこなかった」のどれかを**ログから一切判別できなかった**
+（2026-08-06 dev: 会社単位 14 店舗が全件 `login_failed`。所要 72s が `NAV_TIMEOUT` 60s と整合するが、
+doLogin 応答待ちの空振りか `networkidle` 不達かは不明だった）。
+
+| 項目 | 内容 | playwright | http |
+|---|---|---|---|
+| `doLoginObserved` / `doLoginStatus` / `doLoginBodyLength` | doLogin 応答を観測できたか・HTTP ステータス・本文長 | `waitForResponse` の成否 | 常に観測（`true`） |
+| `landingUrl` | ログイン後の着地 URL（**クエリ除去**） | `page.url()` | `null`（明示 POST のため着地なし） |
+| `pageTitle` | `<title>`（`extractPageTitle`。`page.title()` は使わず両経路同一実装） | ○ | ○ |
+| `finalHtmlLength` | 遷移後 HTML の長さ | ○ | ○（groupTop 応答） |
+| `isLoginPage` | 応答がサロンボードのログイン画面か（**REQ-5 の主判定**） | ○ | ○ |
+| `authErrorText` | 認証エラー文言（最大 100 文字。**実測では出ないため補助情報**） | ○ | ○ |
+| `blockSignals` | WAF/bot 対策マーカー名の一覧（`Access Denied` / `Reference #` / `Incapsula` 等） | ○ | ○ |
+| `timings` | `loginPageMs` / `clickMs` / `doLoginWaitMs` / `navigationMs` | 4 項目とも | `clickMs` は `null` |
+| `bodySnippet` | タグ除去後の先頭 300 文字（PII マスク済み） | ○ | ○ |
+| `loginIdMasked` | ログイン ID の先頭 2 文字のみ（`CD***`） | ○ | ○ |
+
+**秘匿情報（必須）**: パスワードは**採取項目に存在しない**。ログイン ID はマスクし、本文抜粋は
+`redactPiiText`（Sentry の PII スクラブと同一規約）でメール/電話を潰したうえで、本文へ echo された
+ログイン ID 原文もマスク値へ置換する。純関数（`isLoginPageHtml` / `extractPageTitle` / `extractAuthErrorText` /
+`detectBlockSignals` / `maskLoginId` / `stripUrlQuery` / `htmlSnippet` / `buildLoginDiagnostics`）は
+`salonboard-client.ts` に置き、unit テストで固定する。
+
+**ログイン画面判定（`isLoginPageHtml`）**: サロンボードは**認証失敗時にエラー文言を一切出さずログイン画面を
+再表示する**（実採取 fixture `login-failure.html` に `エラー`/`正しく`/`一致` 等の文字列が 1 つも無い）。
+したがって文言ではなく「ログインフォーム（`input[name="userId"]` + `input[name="password"]`）が返ってきたか」で
+判定する。成功時の応答（`login-success.html`）は groupTop への auto-submit フォームのみでログインフォームを
+持たないため、fixture 2 本で判定を確定できる。`sc_data.pagegroup1` は成功応答にも `'ログイン'` が入るので
+判定には使わない。
+
+### ログイン失敗のリトライ（residential 出口 IP のばらつき + 遮断疑い）
 
 residential プロキシは**出口 IP の品質にばらつき**があり、遅い/タールピットされる IP を掴むと login の
 `page.goto`（playwright）/ fetch（http）が**タイムアウト**する（実測: 同一コードで login が 9.6s 成功／
-65.6s 激遅と IP 依存）。`loginWithRetry`（`salonboard-import.service.ts`）が **`timeout` / `proxy_error` のときだけ
-新しいスティッキーセッション（=新 runId=新 IP）で最大 3 回（`MAX_LOGIN_ATTEMPTS`）引き直す**。同じ IP で粘らず
-**IP を変えて引き直す**のが要点。各試行間にジッタを挟む（velocity 抑制）。会社単位・店舗単位の両ログイン経路に適用。
-**リトライしないもの**:
-- `CAPTCHA`（引き直しは velocity を上げ bot スコアを悪化させる。即失敗）
-- `login.ok=false`（認証情報誤り。引き直すとアカウントロックの恐れ。即失敗）
-- クライアント構築失敗（proxy 未設定等の恒久的な設定エラー。`loginWithRetry` の外へ伝播）
+65.6s 激遅と IP 依存）。`loginWithRetry`（`salonboard-login.ts`）が新しいスティッキーセッション
+（=新 runId=新 IP）で引き直す。同じ IP で粘らず**IP を変えて引き直す**のが要点。各試行間にジッタを挟む
+（velocity 抑制）。会社単位・店舗単位の両ログイン経路に適用。
+
+| 観測 | 判定 | 挙動 | 記録される理由 |
+|---|---|---|---|
+| `timeout` / `proxy_error` を throw | 一過性 | 新 IP で最大 3 回（`MAX_LOGIN_ATTEMPTS`）引き直す | `timeout` / `proxy_error` |
+| `login.ok=false` かつ **doLogin 応答あり かつ ログイン画面が返った** | 認証拒否 | **引き直さず即失敗**（アカウントロック回避） | `login_failed` |
+| `login.ok=false` かつ **doLogin 応答なし／非ログイン画面／遮断シグナル検出** | 遮断疑い | **新 IP で 1 回だけ**引き直す（`MAX_BLOCK_RETRIES=1`） | 復旧すれば成功。再失敗で `login_blocked` |
+| `login.ok=false` かつ **診断が取れない**（旧クライアント / テスト fake） | 認証拒否扱い（フェイルセーフ） | 引き直さず即失敗 | `login_failed` |
+| `CAPTCHA` を throw | — | 引き直さない（velocity を上げ bot スコアを悪化させるため） | `captcha_detected` |
+| クライアント構築失敗（proxy 未設定等） | 恒久エラー | `loginWithRetry` の外へ伝播 | `proxy_error` 等 |
+
+判定は `isBlockSuspected(diagnostics)` に閉じている。**診断が `undefined` のときは `false`（= 引き直さない）**
+へ倒す: 逆にすると認証情報が誤っているアカウントを毎回 2 回叩くことになり、リトライを絞っている当初の目的
+（アカウントロック回避）を損なうため。
+
+検証経路（admin の「連携／検証」）は API Gateway 29s 配下なので `totalBudgetMs` / `minAttemptBudgetMs` が
+設定されており、**残予算が 1 回のログインを完走できる量に満たなければ引き直さない**（`budgetExceeded`）。
+取り込み（batch）は予算指定が無く、常に 1 回の引き直しが可能。`login_blocked` は**一過性理由**として扱い
+`TERMINAL_IMPORT_LOG_REASONS` に含めない（翌日の日次取り込みで再試行）。
 
 **Chromium 実行環境（REQ-5・採用: Lambda + `@sparticuz/chromium`）**: `selectChromiumSource(env)` が優先順
 `CHROMIUM_EXECUTABLE_PATH` > `CHROMIUM_CHANNEL`（ローカルの system Chrome） > `AWS_LAMBDA_FUNCTION_NAME` あり
@@ -317,11 +365,53 @@ enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約�
    - それ以外 → **非 prod PII マスク**して `pre_send`（送信前）で `cancellations` を作成。
    - ブラウザ/プロキシ起因の失敗（#22 / REQ-7）は理由分類して記録（いずれも一過性=非 terminal・翌日リトライ）:
      `captcha_detected`（CAPTCHA 昇格）/ `proxy_error`（プロキシ接続失敗）/ `timeout`（通信タイムアウト）/
-     `login_failed`（`userid` 取得できず）。login・店舗遷移（enterStore/一覧取得）・詳細取得のいずれの経路でも
-     `classifyFailure` で分類し、会社別実行結果の `shops[].reasonCode` / `byReason` と取り込みログ `reason` に残す。
+     `login_failed`（`userid` 取得できず＝認証拒否）/ `login_blocked`（**ログイン遮断疑い**。GTSS-817-qa。
+     doLogin 応答なし・非ログイン画面・遮断シグナルのいずれかで、新 IP の引き直しでも復旧しなかった）。
+     login・店舗遷移（enterStore/一覧取得）・詳細取得のいずれの経路でも `classifyFailure` で分類し、
+     会社別実行結果の `shops[].reasonCode` / `byReason` と取り込みログ `reason` に残す。`login_blocked` は
+     admin の実行履歴で「ログイン遮断疑い」ラベルとして表示される（未知コードはコードのままフォールバック）。
 5. 結果（対象店舗数・店舗別 作成/対象外スキップ/失敗 件数）を集計して返す。あわせて実行単位の結果を
    `external_import_runs` に必ず記録する（`triggerType`・店舗別内訳・失敗 error を含む）。店舗ループ以前の
    致命的失敗（店舗一覧取得失敗等）も握り潰さず `ok:false` で記録する（記録自体の失敗は取り込みを壊さない）。
+
+## ログイン失敗の可観測性（GTSS-817-qa / REQ-2,3,4）
+
+`login_failed` は例外を投げないため、以前は **CloudWatch を人が見に行かない限り誰も気づけない**状態だった
+（Sentry にも Slack にも何も届かない）。さらに**会社単位連携では 1 回のログイン失敗が全店舗へ複製される**ため、
+14 店舗分の同一メッセージが並ぶだけで原因が読み取れなかった。現在は次の 3 経路へ出す。
+
+### 1. 構造化ログ（CloudWatch Logs Insights）
+
+`markCompanyShopsFailed`（`salonboard-import.service.ts`）が **接頭辞を付けない純 JSON 1 引数**で
+`console.error` する（Logs Insights が自動パースできるようにするため。`[salonboard-import] {...}` のように
+前置きを付けると JSON として解釈されない）。
+
+- **会社単位連携**: 店舗ごとではなく**会社ごとに 1 行**（`shopId` / `externalStoreId` は `null`、
+  `affectedShops` に影響店舗数）。
+- **店舗単位連携**: 従来どおり**失敗した店舗ごとに 1 行**（`shopId` / `externalStoreId` を含む）。
+- ログイン以外の失敗（`importShop` 内の店舗遷移・一覧取得失敗、予約詳細取得失敗）は**既存のログ形式のまま**変えない。
+- 連携設定未完了（`reasonCode` なし）は既知状態なので出力しない（admin の `shops[].error` には出る）。
+
+```json
+{"logger":"salonboard-import","event":"login_failure","source":"salonboard","unit":"company",
+ "applicationId":"app_1780047468842","trigger":"manual","route":"lambda","reason":"login_blocked",
+ "reasonLabel":"ログイン遮断疑い","affectedShops":14,"shopId":null,"externalStoreId":null,
+ "message":"サロンボードへのログインが遮断された可能性があります","diagnostics":{ ... }}
+```
+
+`event` は理由に依存しない中立名（`login_failure`）で、実理由は `reason` に入る。`event` を軸に絞ったとき
+`login_blocked` を認証拒否と誤読しないため。`route` は `lambda` / `ecs` / `local`
+（`resolveExecutionRoute`。手動取り込みは batch Lambda、日次は batch ECS）。
+
+### 2. Sentry
+
+`captureLoginFailureToSentry` が `Sentry.captureMessage` で送る。タグ・fingerprint の規約は
+`docs/tech/sentry.md` の「取り込み失敗の captureMessage」を参照。送信失敗は握り潰し、取り込みを止めない。
+
+### 3. Slack
+
+`runSalonboardImport` の末尾で、**失敗店舗が 1 件以上 or 実行全体が致命的失敗**のときだけ 1 通投稿する。
+送信経路・環境変数・通知内容は `docs/tech/alerting.md` を参照。
 
 ### 請求金額の算出（REQ-2 / `cancellation-fee.ts`）
 
@@ -523,7 +613,7 @@ SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解�
   `salonboard-proxy-config`（Decodo username/fail-safe）。
 - e2e（`app.request()` + fake client 注入 + fixture）: 連携検証/保存（`salonboard-integration`）/
   取り込みフィルタ・冪等・スキップ/ログ・PIIマスク・**直列化（inflight=1）/ジッタ/失敗理由分類/ログイン一過性失敗
-  リトライ（timeout は新IPで引き直し成功・連続timeoutは上限3回・CAPTCHA/認証誤りは即失敗）**（`salonboard-import`）/
+  リトライ（timeout は新IPで引き直し成功・連続timeoutは上限3回・CAPTCHA/認証拒否は即失敗）**（`salonboard-import`）/
   送信・手動取り込み・バッチ dispatch・取り込みログ API（`salonboard-send`）/ 一覧店舗名分離（`cancellations-list-shop`）。
   **#23 追加**: 店舗単位 verify/save・店舗CRUD・連携単位/lock・一覧の `applicationId` フィルター・実行記録の会社単位化・
   マルチソース独立・リネーム回帰（`external_shops`→`shops`）。
@@ -535,6 +625,17 @@ SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解�
   **GTSS-890 追加/更新**（連携単位 × ログイン種別のミスマッチ）:
   - unit `salonboard-parser`: `detectAccountUnit`（会社 fixture=company / 単一店舗 fixture=shop / 店舗トップ着地
     HTML=shop / 空・想定外 HTML=null / 店舗一覧1件＋hidden STORE_ID の競合は company 優先）。
+  **GTSS-817-qa 追加**（ログイン失敗の原因特定）:
+  - unit `salonboard-login-diagnostics`: 実 fixture でのログイン画面判定（失敗=true / 成功=false）、タイトル・
+    遮断シグナル・エラー文言抽出、ログイン ID / メール / 電話のマスク（診断 JSON に原文が残らないこと）、
+    両トランスポートの失敗時診断（HTTP は `landingUrl` / `clickMs` が null）、成功時は `diagnostics` 未設定。
+  - unit `salonboard-login`: 認証拒否は 1 試行のみ、遮断疑いは新 runId で 1 回だけ引き直し（ジッタあり）、
+    引き直し成功で継続、再失敗で `loginBlocked`、総予算切れ・最低試行予算不足では引き直さない。
+  - unit `slack-notifier`: 送信経路の解決（BotToken / Webhook / no-op）、投稿失敗（reject / HTTP エラー /
+    `ok:false`）でも throw しない、`NODE_ENV=test` で実送信しない。
+  - e2e `salonboard-import-observability`: 会社単位=会社ごと 1 行 / 店舗単位=店舗ごと 1 行の構造化 JSON、
+    Sentry のタグ・fingerprint・診断コンテキスト、Sentry 送信失敗でも取り込み継続、失敗ありで Slack 1 通・
+    全件成功なら投稿なし・投稿失敗でもサマリ不変、`login_blocked` の計上と確定理由に含めないこと。
   - unit `salonboard-shop-verify`: `decideShopVerify` の「件数（0/1/2以上）× 実効単位 × 一致リンク有無」網羅、
     店舗1件が会社アカウント扱いになること（会社/対象店舗の指定が無い検証では救済しない）。
     **1件パスの住所スクレイピングテストは救済成立ケースの e2e へ移設**（DB シードが要るため）。

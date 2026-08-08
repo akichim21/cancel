@@ -2,7 +2,7 @@
 
 全4リポジトリのエラー監視を Sentry に統一する。本書は**プロジェクト構成・初期化方式・PII スクラブ・source map・環境変数**の運用規約をまとめる。
 
-- 関連: `docs/tech/ci-cd.md`（秘密の配布経路）/ `docs/tech/secrets-management.md` / `docs/tech/batch-fargate.md`（batch の ECS 経路）
+- 関連: `docs/tech/ci-cd.md`（秘密の配布経路）/ `docs/tech/secrets-management.md` / `docs/tech/batch-fargate.md`（batch の ECS 経路）/ `docs/tech/alerting.md`（Slack 通知）
 - 実装 Issue: akichim21/cancel #39（GTSS-858）
 
 ## 1. プロジェクト構成
@@ -52,6 +52,38 @@ API は `src/observability/sentry.ts` の純関数で二重に防御する（`be
 > **注意**: 本文スクラブはメール/電話パターンに限定される。**氏名など任意テキストは検出できない**ため、「例外メッセージ・console ログに顧客 PII を載せない」のはコード側の責務（レビュー観点）。
 
 フロント3つは **Replay を `maskAllText: true` / `blockAllMedia: true`** でマスクする（admin は顧客 PII 表示が多いため特に重要）。
+
+## 3.5 取り込み失敗の `captureMessage`（GTSS-817-qa / サロンボード取り込み）
+
+サロンボード取り込みのログイン失敗は**例外を投げない**（`login()` が `ok:false` を返すだけ）ため、
+`wrapHandler` / `app.onError` の捕捉対象にならない。そこで取り込みサービス
+（`src/services/salonboard-import.service.ts` の `captureLoginFailureToSentry`）が**明示的に**
+`Sentry.captureMessage` で送る。
+
+- **対象理由**: `login_failed` / `login_blocked` / `captcha_detected` / `proxy_error` / `timeout`
+  （= `LOGIN_FAILURE_REASONS`）。**ログイン経路のみ**が対象で、店舗遷移・一覧取得・予約詳細取得の失敗は
+  送らない（それらは予約/店舗単位で日常的に発生し、翌日リトライで解消するため通知価値が低い）。
+- **level**: `error`
+- **タグ**:
+
+  | タグ | 値 |
+  |---|---|
+  | `feature` | `salonboard-import` |
+  | `import.reason` | `login_failed` / `login_blocked` / `captcha_detected` / `proxy_error` / `timeout` |
+  | `import.unit` | `company`（会社単位連携） / `shop`（店舗単位連携） |
+  | `import.applicationId` | 申請 ID |
+  | `import.trigger` | `manual`（手動） / `scheduled`（日次） |
+  | `import.route` | `lambda` / `ecs` / `local`（`resolveExecutionRoute`） |
+
+- **fingerprint**: `['salonboard-import', 'login-failure', reason]` = **失敗理由ごとに 1 Issue へ集約**する。
+  会社単位連携は 1 回のログイン失敗が全店舗へ複製されるため、会社・店舗を fingerprint に入れると通知が氾濫する。
+- **contexts.salonboard_login**: REQ-1 の診断情報（`doLoginObserved` / `landingUrl` / `pageTitle` /
+  `isLoginPage` / `blockSignals` / `timings` / `bodySnippet` 等）+ `message` + `affectedShops`。
+- **送信失敗は握り潰す**（`try/catch` + `console.error`）。Sentry が落ちていても取り込みは完走する。
+
+診断情報は採取側（`salonboard-client.ts`）でパスワード非採取・ログイン ID マスク・本文の
+メール/電話マスクを済ませており、さらに `beforeSend` の `scrubEventPii` が `loginIdMasked` 等の
+キーを `[Filtered]` にする（二重防御）。
 
 ## 4. environment の出し分け（MODE 非依存・重要）
 
