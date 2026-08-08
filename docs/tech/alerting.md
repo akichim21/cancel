@@ -82,16 +82,43 @@ batch ECS で共通）が太るため、必要な 1 エンドポイントだけ�
 > `update-function-configuration --environment` で環境変数セットを**全置換**する。生成 JSON に含めないと
 > 毎デプロイで消える（`SENTRY_DSN` と同じ罠）。コンソールでの手動設定は次回デプロイで消えるため禁止。
 
+### dev の配線状況（適用済み）
+
+**dev は shaire ワークスペースの Bot Token を流用**して配線済み（インフラリポジトリ
+`~/infra/cancel-billing-service-infra` の `GTSS-817-qa`）。
+
+| 項目 | 値 |
+|---|---|
+| SSM パラメータ | `/cancel/api/slack_bot_token`（SecureString・実値は CLI 直 push で state 非搭載） |
+| 通知先チャンネル | `C08NVDWCS5T`（`var.slack_alert_channel`。shaire の二重データ検知アラート ch を暫定流用） |
+| Slack workspace | `GO TODAY SHAiRE SALON`（`TGCRC9VDY`。`var.slack_team_id` と同一） |
+| bot | `shaire`（`U08R3QQ1M2M`。shaire-server の `SlackNotifier` と同じトークン） |
+
+配線の内訳:
+- `dev/codebuild.tf` の `ci_api_secret_keys` へ `slack_bot_token` を追加 → `ci_api` の `ssm_env_vars` に
+  `SLACK_BOT_TOKEN` が自動で入り、`deploy-api.sh` / `deploy-batch.sh` が Lambda の全置換 environment へ投入する
+- `var.slack_alert_channel` を `ci_api` / `ci_batch_image` の `plain_env_vars` へ `SLACK_ALERT_CHANNEL` として供給
+- `batch_fargate.container_secrets` へ `SLACK_BOT_TOKEN` を追加（**IAM 読み取り許可のみ増える**。
+  task definition は `ignore_changes = [container_definitions]` のため既存リビジョンの `secrets` は
+  書き換わらない。dev は `enable_import_schedule = false` で日次取り込みを ECS で回さず、手動取り込みは
+  batch Lambda のため、当面は Lambda 経路だけで通知が成立する）
+
+> **通知先が shaire の業務チャンネル**である点に注意。cancel の取り込み失敗が混ざるため、運用感を見て
+> 専用チャンネルへ分ける可能性がある。変える場合は `var.slack_alert_channel` を差し替えて再 apply し、
+> **新チャンネルへ bot を招待する**（未招待だと `chat.postMessage` が `not_in_channel` で失敗する）。
+> この bot は `chat:write` のみで `channels:read` を持たないため、参加確認は Slack API から取れない。
+
 ### 未対応（インフラリポジトリ側の別作業）
 
-CI/CD（CodeBuild）経由でデプロイする場合、以下が必要。**未実施の間は Slack 通知が no-op になるだけで
-デプロイもバッチも通常どおり完走する**（`buildspec.yml` / `buildspec-batch.yml` にコメントで明記済み）。
+- **prod は未配線**。dev と同じ手順（`prod/codebuild.tf` の `ci_api_secret_keys` へ `slack_bot_token` 追加 →
+  `terraform apply` → `aws ssm put-parameter --overwrite` で実値投入）。通知先チャンネルは prod 用に
+  分けるか要検討。
+- **ECS 経路での実注入**。`container_secrets` への追加だけでは既存 task definition リビジョンへ反映されない
+  （上記の `ignore_changes`）。ECS で日次取り込みを回す環境では task definition の再 register が要る。
+- **Webhook 方式は未使用**。`SLACK_WEBHOOK_URL` を使う場合も SSM + `ssm_env_vars` へ同様に追加する。
 
-1. `SLACK_BOT_TOKEN`（または `SLACK_WEBHOOK_URL`）を SSM パラメータへ登録する。
-2. Terraform の CodeBuild プロジェクト定義（`dev/codebuild.tf` / `prod/codebuild.tf` の `ci_api`）へ
-   `type=PARAMETER_STORE` の環境変数として追加する。`SLACK_ALERT_CHANNEL` は非秘密なので平文で可。
-3. ECS 経路を使う場合は `modules/batch-fargate` の `container_secrets` へ `SLACK_BOT_TOKEN` /
-   `SLACK_WEBHOOK_URL` を追加する。
+いずれも**未実施の間は Slack 通知が no-op になるだけでデプロイもバッチも通常どおり完走する**
+（`buildspec.yml` / `buildspec-batch.yml` にコメントで明記済み）。
 
 ## 6. Slack 側の準備手順
 
