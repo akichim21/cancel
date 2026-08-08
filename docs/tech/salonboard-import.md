@@ -335,6 +335,38 @@ ephemeral `/tmp` 1024MB へ引き上げ、`SALONBOARD_TRANSPORT` / `DECODO_*` �
 dev/prod は `.env.development`/`.env.production` に `DECODO_PROXY_HOST`/`DECODO_PROXY_PORT` を記載しないと
 `requireSalonboardProxy` が `proxy_error` で停止する。
 
+### 店舗遷移・一覧取得の失敗リトライ（GTSS-817-qa / REQ-8）
+
+ログインが成功した後も、**店舗コンテキストへの遷移（`enterStore` の `page.goto(/CLS/hair/reservations/init/)`）と
+一覧取得**は同じ理由（遅い出口 IP・Akamai の一時的な引き延ばし）で `NAV_TIMEOUT`(60s) を超えて落ちる。
+2026-08-08 dev の実測では **14 店舗中 13 店舗が成功する同一ラン**で 1 店舗だけこの遷移が timeout した。
+`importShop` はここで即失敗していたため、その店舗は**予約一覧すら取得しておらず丸ごと未取り込み**（取り込みログ
+`external_import_logs` にも 1 行も残らず、`external_import_runs.shops[].error` にだけ残る）になっていた。
+取得窓は「実行日の 3 日前〜3 か月後」なので、**翌日の日次実行では窓の左端の予約が窓外へ落ちて取りこぼす**
+（＝失敗した日の分は永久に取り込まれない）。
+
+そこでログインと同じ思想で、**同じ IP で粘らず新しいスティッキーセッション（=新 runId=新 IP）で引き直して
+1 回だけ再試行**する（`MAX_SHOP_FETCH_ATTEMPTS = 2`）。引き直しの前にはジッタを挟む（velocity 抑制）。
+
+| 観測（`classifyFailure` の分類） | 挙動 | 記録される理由 |
+|---|---|---|
+| `timeout` / `proxy_error` | 新セッション（=新 IP）で**1 回だけ**再試行。成功すれば通常どおり取り込む | 復旧すれば失敗計上なし。再失敗で `timeout` / `proxy_error` |
+| `captcha_detected` | 引き直さない（velocity を上げ bot スコアを悪化させるため。ログインと同じ） | `captcha_detected` |
+| 理由分類できない失敗（誤店舗 forward の 4xx・HTML 構造変化・パース失敗） | 引き直さない（同じ結果にしかならない） | 分類なし（`shops[].error` のみ） |
+
+- **引き直し上限は 1 実行（会社ラン）あたり 2 回**（`MAX_SESSION_RENEWALS_PER_RUN`）。全店舗が失敗するような
+  事象は遮断・障害の可能性が高く、粘っても bot スコアを悪化させるだけなので、上限到達後は再試行しない
+  （`session_renew_skipped` を出力し、`shops[].error` は「店舗取得失敗（セッション引き直し不可）: …」になる）。
+  手動取り込みが動く batch Lambda の実行時間（600s）を食い潰さないための歯止めでもある。
+- **会社単位**は引き直したセッションを**以降の店舗へ引き継ぐ**（1 ラン 1 セッションの原則を維持）。引き直しの
+  再ログイン自体が失敗した場合は、セッションが無い状態で進むと店舗ごとに無意味なエラーが並ぶため、
+  **残りの店舗を同じ理由（`login_failed` 等）で失敗計上して打ち切る**（`session_renew_failed` を出力）。
+- **店舗単位**は当該店舗の認証情報で張り直す（他店舗には影響しない）。
+- 試行回数は `shops[].attempts` に残る（1 回で済んだ店舗には付かない）。`shops[].error` は再試行した場合
+  「店舗取得失敗（2回試行）: …」になる。
+- 予約詳細取得の失敗（`detail_fetch_failed` 等）はここではリトライしない。予約単位で取り込みログに残り、
+  **翌日の日次実行で再評価される**（非 terminal reason）ため、一覧が取れていれば取りこぼしは起きない。
+
 **ログイン成功判定（単一店舗アカウント対応）**: `userid` は doLogin 応答に載る。会社単位は遷移先 groupTop にも
 残るが、**単一店舗アカウントは login 後 `/CLP/bt/top/`（店舗トップ）へ遷移し最終 HTML に userid を持たない**。
 そのため Playwright 実装は `page.on('response')` で doLogin 応答本文を捕捉して userid を判定する（遷移先 HTML へ
@@ -389,7 +421,11 @@ enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約�
 - **会社単位連携**: 店舗ごとではなく**会社ごとに 1 行**（`shopId` / `externalStoreId` は `null`、
   `affectedShops` に影響店舗数）。
 - **店舗単位連携**: 従来どおり**失敗した店舗ごとに 1 行**（`shopId` / `externalStoreId` を含む）。
-- ログイン以外の失敗（`importShop` 内の店舗遷移・一覧取得失敗、予約詳細取得失敗）は**既存のログ形式のまま**変えない。
+- **店舗遷移・一覧取得**（`importShop`）も同じ純 JSON 形式で出す（REQ-8）。`event` は
+  `shop_fetch_retry`（一過性失敗を検知し引き直す）/ `shop_fetch_recovered`（再試行で成功。`console.log` 側）/
+  `shop_fetch_failed`（失敗確定）で、`attempt` / `maxAttempts` と店舗 ID を含む。引き直しの可否は
+  `session_renew_skipped`（1 実行あたりの上限に到達）/ `session_renew_failed`（再ログイン失敗）で追える。
+- 予約詳細取得の失敗は**既存のログ形式のまま**変えない（予約単位で取り込みログに残るため）。
 - 連携設定未完了（`reasonCode` なし）は既知状態なので出力しない（admin の `shops[].error` には出る）。
 
 ```json
@@ -633,6 +669,10 @@ SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解�
     引き直し成功で継続、再失敗で `loginBlocked`、総予算切れ・最低試行予算不足では引き直さない。
   - unit `slack-notifier`: 送信経路の解決（BotToken / Webhook / no-op）、投稿失敗（reject / HTTP エラー /
     `ok:false`）でも throw しない、`NODE_ENV=test` で実送信しない。
+  - e2e `salonboard-import-retry`: 店舗遷移/一覧取得の一過性失敗（timeout / proxy_error）を新セッションで
+    1 回だけ引き直して復旧すること、再失敗は当該店舗のみ失敗計上（`attempts=2`・他店舗は継続）、CAPTCHA と
+    理由分類できない失敗は引き直さないこと、引き直し上限（2 回/実行）到達後は再試行しないこと、
+    引き直しの再ログイン失敗で残り店舗を同理由で打ち切ること、店舗単位連携でも引き直すこと。
   - e2e `salonboard-import-observability`: 会社単位=会社ごと 1 行 / 店舗単位=店舗ごと 1 行の構造化 JSON、
     Sentry のタグ・fingerprint・診断コンテキスト、Sentry 送信失敗でも取り込み継続、失敗ありで Slack 1 通・
     全件成功なら投稿なし・投稿失敗でもサマリ不変、`login_blocked` の計上と確定理由に含めないこと。
