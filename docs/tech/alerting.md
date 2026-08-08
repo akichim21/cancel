@@ -98,10 +98,35 @@ batch ECS で共通）が太るため、必要な 1 エンドポイントだけ�
 - `dev/codebuild.tf` の `ci_api_secret_keys` へ `slack_bot_token` を追加 → `ci_api` の `ssm_env_vars` に
   `SLACK_BOT_TOKEN` が自動で入り、`deploy-api.sh` / `deploy-batch.sh` が Lambda の全置換 environment へ投入する
 - `var.slack_alert_channel` を `ci_api` / `ci_batch_image` の `plain_env_vars` へ `SLACK_ALERT_CHANNEL` として供給
-- `batch_fargate.container_secrets` へ `SLACK_BOT_TOKEN` を追加（**IAM 読み取り許可のみ増える**。
-  task definition は `ignore_changes = [container_definitions]` のため既存リビジョンの `secrets` は
-  書き換わらない。dev は `enable_import_schedule = false` で日次取り込みを ECS で回さず、手動取り込みは
-  batch Lambda のため、当面は Lambda 経路だけで通知が成立する）
+- `batch_fargate.container_secrets` へ `SLACK_BOT_TOKEN` を追加（タスク実行ロールの `ssm:GetParameters` 許可）
+- `ci_batch_image.plain_env_vars` へ `BATCH_CONTAINER_SECRETS` を追加 → `deploy-batch-ecs.sh` が
+  task definition の `secrets` へ載せる（後述）
+
+#### ECS task definition の `secrets` は deploy スクリプトが所有する
+
+`aws_ecs_task_definition` は `lifecycle { ignore_changes = [container_definitions] }` を持つ。これは
+「TF apply のたびに task definition が `:bootstrap` イメージ + 最小 env へ巻き戻るのを防ぐ」ための
+所有分割（TF = 骨組み / deploy スクリプト = イメージタグと環境変数）だが、**`ignore_changes` は更新時のみ
+効き、新規作成時は効かない**。そのため `container_secrets` へ後から追加しても、**既に存在する family の
+リビジョンには永久に反映されない**。
+
+実例（dev 実測）: GTSS-886 で追加した `TWILIO_AUTH_TOKEN` は新規 family の `reminders` にだけ入り、
+既存の `import` / `payouts` には入っていなかった。`SLACK_BOT_TOKEN` も同じ理由で落ちる。
+
+そこで `deploy-batch-ecs.sh` が `environment` と同様に `secrets` も所有する（GTSS-817-qa）。
+
+- 供給源は CI が注入する `BATCH_CONTAINER_SECRETS`（`NAME=SSM の ARN` のカンマ区切り）
+- Terraform 側で `container_secrets`（= IAM 許可）と**同じ `local` から生成**するため、スクリプトの
+  一覧と実行ロールの許可がズレない（ズレると `ResourceInitializationError` で起動失敗する）
+- 既存（`describe`）との**和集合**にし、同名はスクリプト定義を優先する。TF や手動で足された参照を
+  落として起動時 env が欠ける事故を避ける
+- **未設定なら既存 `secrets` を温存**（従来挙動。prod / 手元実行の後方互換）
+- `valueFrom` が ARN でなければ parse 時と register 前ガードの二重で拒否する（実値を渡した場合に
+  task definition へ平文で焼き込まないため）
+
+> **秘匿性**: `secrets[].valueFrom` に入るのは **SSM の ARN（参照）であって値ではない**。実値は起動時に
+> ECS agent が SSM から取得し、task definition にも CodeBuild ログにも載らない。「実秘密を
+> `environment`（平文）へ入れない」という GTSS-860 の不変条件は維持される。
 
 > **通知先が shaire の業務チャンネル**である点に注意。cancel の取り込み失敗が混ざるため、運用感を見て
 > 専用チャンネルへ分ける可能性がある。変える場合は `var.slack_alert_channel` を差し替えて再 apply し、
@@ -113,8 +138,12 @@ batch ECS で共通）が太るため、必要な 1 エンドポイントだけ�
 - **prod は未配線**。dev と同じ手順（`prod/codebuild.tf` の `ci_api_secret_keys` へ `slack_bot_token` 追加 →
   `terraform apply` → `aws ssm put-parameter --overwrite` で実値投入）。通知先チャンネルは prod 用に
   分けるか要検討。
-- **ECS 経路での実注入**。`container_secrets` への追加だけでは既存 task definition リビジョンへ反映されない
-  （上記の `ignore_changes`）。ECS で日次取り込みを回す環境では task definition の再 register が要る。
+- **prod の ECS `secrets` 所有権移行**。prod は `BATCH_CONTAINER_SECRETS` 未注入のため、
+  `deploy-batch-ecs.sh prod` は従来どおり `describe` の既存 `secrets` を温存する（挙動不変）。
+  prod へ広げる場合は dev と同じ `local` パターンを `prod/main.tf` / `prod/codebuild.tf` へ入れる。
+  ⚠️ その際 prod の `ci_api_secret_keys` に `slack_bot_token` が無い状態で map に含めると、
+  SSM パラメータも IAM 許可も無いため `ResourceInitializationError` で**バッチが起動しなくなる**。
+  必ず「`ci_api_secret_keys` へ追加 → apply → 実値を put-parameter」を先に済ませること。
 - **Webhook 方式は未使用**。`SLACK_WEBHOOK_URL` を使う場合も SSM + `ssm_env_vars` へ同様に追加する。
 
 いずれも**未実施の間は Slack 通知が no-op になるだけでデプロイもバッチも通常どおり完走する**
