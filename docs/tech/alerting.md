@@ -135,19 +135,44 @@ batch ECS で共通）が太るため、必要な 1 エンドポイントだけ�
 
 ### 未対応（インフラリポジトリ側の別作業）
 
-- **prod は未配線**。dev と同じ手順（`prod/codebuild.tf` の `ci_api_secret_keys` へ `slack_bot_token` 追加 →
-  `terraform apply` → `aws ssm put-parameter --overwrite` で実値投入）。通知先チャンネルは prod 用に
-  分けるか要検討。
-- **prod の ECS `secrets` 所有権移行**。prod は `BATCH_CONTAINER_SECRETS` 未注入のため、
-  `deploy-batch-ecs.sh prod` は従来どおり `describe` の既存 `secrets` を温存する（挙動不変）。
-  prod へ広げる場合は dev と同じ `local` パターンを `prod/main.tf` / `prod/codebuild.tf` へ入れる。
-  ⚠️ その際 prod の `ci_api_secret_keys` に `slack_bot_token` が無い状態で map に含めると、
-  SSM パラメータも IAM 許可も無いため `ResourceInitializationError` で**バッチが起動しなくなる**。
-  必ず「`ci_api_secret_keys` へ追加 → apply → 実値を put-parameter」を先に済ませること。
 - **Webhook 方式は未使用**。`SLACK_WEBHOOK_URL` を使う場合も SSM + `ssm_env_vars` へ同様に追加する。
 
-いずれも**未実施の間は Slack 通知が no-op になるだけでデプロイもバッチも通常どおり完走する**
+未実施の間は Slack 通知が no-op になるだけでデプロイもバッチも通常どおり完走する
 （`buildspec.yml` / `buildspec-batch.yml` にコメントで明記済み）。
+
+### prod の配線状況（コードは投入済み・**apply は未実施**）
+
+`prod/codebuild.tf` / `prod/main.tf` を dev と同一構成にしてある（インフラリポジトリ `GTSS-817-qa`）。
+**apply と SSM 実値投入は本番のため人手**で行う。
+
+plan（`-target` なしの完全 plan でも同一。無関係 drift 無し）:
+
+```
+Plan: 1 to add, 4 to change, 0 to destroy
+  aws_ssm_parameter.api_secret["slack_bot_token"]                create
+  module.batch_fargate.aws_iam_role_policy.task_exec_secrets[0]  update in-place
+  module.ci_api.aws_codebuild_project.this                       update in-place
+  module.ci_api.aws_iam_role_policy.codebuild                    update in-place
+  module.ci_batch_image.aws_codebuild_project.this               update in-place
+```
+
+task definition の再 register も destroy も発生しない。
+
+**実施順序（重要）**
+
+1. `cd prod && terraform apply` — SSM プレースホルダ作成 + CodeBuild env 更新
+2. `aws ssm put-parameter --overwrite --name /cancel/api/slack_bot_token --type SecureString --value <Bot Token>`
+   （**apply より先に put すると `aws_ssm_parameter` の作成が `ParameterAlreadyExists` で落ちる**）
+3. 次の prod デプロイで反映される。ECS 側は `deploy-batch-ecs.sh` が `secrets` を載せるので
+   **task definition の `-replace` は不要**
+
+> プレースホルダのまま先にデプロイしても ECS / Lambda は起動する（SSM パラメータは存在するため
+> `GetParameters` は成功する）。値が `PLACEHOLDER_...` なので `chat.postMessage` が `invalid_auth` で
+> 失敗し、**通知だけが届かない**（バッチ本体は正常に完走する）。
+
+**apply 前に決めること**: 通知先 default は dev と同じ `C08NVDWCS5T`（shaire の業務チャンネル）。
+prod の取り込み失敗をそこへ混ぜてよいか判断し、分けるなら `var.slack_alert_channel` を差し替えて
+**そのチャンネルへ bot を招待**する。
 
 ## 6. Slack 側の準備手順
 
