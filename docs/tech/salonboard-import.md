@@ -452,8 +452,19 @@ enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約�
 
 ### 3. Slack
 
-`runSalonboardImport` の末尾で、**失敗店舗が 1 件以上 or 実行全体が致命的失敗**のときだけ 1 通投稿する。
-送信経路・環境変数・通知内容は `docs/tech/alerting.md` を参照。
+`runSalonboardImport` の末尾で、**失敗のあった会社ごとに 1 通**投稿する（#64。1 実行あたり個別 10 通 +
+超過分の集約 1 通が上限）。全件成功した会社と、連携設定が未完了なだけの会社は投稿しない。会社ループを
+最後まで回せなかったときは「バッチが実行できませんでした」の 1 通のみで、会社ごとの通知とは**排他**。
+本文の組み立ては `src/services/salonboard-import-notify.ts` の純関数に閉じ込めてある。
+書式・エラー種別の写像・対応の目安のマトリクス・送信経路・環境変数は `docs/tech/alerting.md` を参照。
+
+> **`IMPORT_LOG_REASON` に新しい失敗理由を追加するときは、通知のエラー種別写像テーブル
+> （`IMPORT_ERROR_KIND_BY_REASON` / `IMPORT_ERROR_DETAIL_TEXTS` / `IMPORT_FAILURE_REASONS`）への追記が必須**。
+> 未追記だと「その他（要調査）」として鳴り続ける（誤って一時的エラーとして黙殺されるより安全側に倒した設計）。
+
+> **通知の写像入力は失敗系コードに限る**。会社別集計の `byReason` は 14 コード全部を 0 で初期化して加算する
+> ため、正常な実行でもスキップ系理由（現地払い以外・規定なし・対象期間外など）に件数が入る。これを写像へ
+> 流し込むと未知コードとして「その他」へ倒れ、一時的エラーだけで落ちた会社が毎回「要調査」で鳴る。
 
 ### 請求金額の算出（REQ-2 / `cancellation-fee.ts`）
 
@@ -540,7 +551,9 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
   作成成功（リトライ成功）時は当該予約のログ行を削除し、キャンセル一覧との矛盾を解消する。
 - `external_import_runs`: **取り込みの実行単位ログ**。#23 で **会社（＋source）ごとに1行**（nullable `application_id`
   ＋index。過去行は NULL のままバックフィルせず、`?applicationId=` フィルター時は除外・無指定では全社表示）。
-  `triggerType`（`scheduled`/`manual`）/ `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) /
+  `triggerType`（`scheduled`=日次自動 / `manual_admin`=運営の手動 / `manual_salon`=サロン本人の手動 /
+  `manual`=旧値。#64 で細分化。カラムは自由文字列で CHECK 制約が無いためマイグレーション不要・既存行は不変）/
+  `ok` / `totalShops` / `created` / `skipped` / `failed` / `byReason`(JSON) /
   `shops`(JSON・店舗別の内訳＋失敗 error) / `error` / `startedAt` / `finishedAt`。集計値のみで PII を含まない。
   管理画面「取り込み実行履歴」/ `GET /import-runs?applicationId=`。
 - **マルチソース**: 上記すべてが `source` を含むため、同一会社で `salonboard`/`rakuten_beauty`/`own_site` 等の
@@ -575,21 +588,28 @@ GTSS-817 #27 で **店舗マスタ（`shops`）と媒体別連携（`shop_integr
 ## バッチ / スケジュール
 
 `src/batch.ts` の `action='salonboard-import'`。EventBridge Scheduler `cron(10 0 * * ? *)` + `Asia/Tokyo`
-（JST 0:10。infra `modules/batch-compute` の `salonboard_import` スケジュール）。取り込みは通知を出さないため
-`initClients()` 不要だが、外部 HTTP egress と認証情報復号の KMS 権限が必要。詳細は `docs/tech/batch-jobs.md`。
+（JST 0:10。infra `modules/batch-compute` の `salonboard_import` スケジュール）。取り込みは**顧客向けの**通知
+（SES / Twilio）を出さないため `initClients()` 不要だが、外部 HTTP egress と認証情報復号の KMS 権限が必要
+（運営向けの Slack 通知は `fetch` 直叩きで `initClients()` に依存しない）。詳細は `docs/tech/batch-jobs.md`。
 
 実行結果は `external_import_runs` テーブルへ記録するのに加え、CloudWatch Logs Insights で `shops[].failed` /
 `error` を抽出・アラート化できるよう構造化ログ（JSON 1 行）も出力する（非同期 invoke では戻り値が破棄されるため
-二重で可視化する）。スケジュール起動は `trigger='scheduled'`、API からの手動委譲は `trigger='manual'`。
+二重で可視化する）。スケジュール起動は `trigger='scheduled'`、API からの手動委譲は呼び出し元に応じて
+`trigger='manual_admin'`（運営）/ `'manual_salon'`（サロン本人）（#64。`resolveManualImportTrigger`）。
+旧値 `'manual'` は後方互換で読むだけ（通知・画面とも「手動実行」「手動」と表示する）。
 
 ### 手動取り込み（REQ-4/9・#23 で申請単位化）
 
 `POST /cancellations/import`（運営のみ）。#23 で **`applicationId` 必須**の会社スコープ実行に変更（無指定は 4xx。
 全社一括の手動実行は廃止し、会社詳細のキャンセル請求管理タブから**その会社のみ**起動する）。**dev/prod**は batch Lambda
-（`action='salonboard-import'`, `trigger='manual'`）へ当該 `applicationId` をスコープに**非同期 Invoke**（`InvocationType='Event'`）
+（`action='salonboard-import'`, `trigger='manual_admin'`）へ当該 `applicationId` をスコープに**非同期 Invoke**（`InvocationType='Event'`）
 で委譲し、`202 { success, started:true }` を即返す。件数は同期返却できないため、admin は「取り込み実行履歴」
 （`external_import_runs`）と一覧で結果を確認する。**local/test**は batch Lambda が無いため同期実行し件数を返す。
 non-infra TODO: API Lambda ロールに batch 関数への `lambda:InvokeFunction` 権限が必要。
+**この非同期 Invoke 自体が失敗した場合**（権限不足・スロットリング・関数不在）は実行履歴を failed で解放し、
+Slack へ「バッチが実行できませんでした」を投稿する（#64 / REQ-7）。取り込みが 1 秒も動いていないため、
+従来は運営に API のエラー応答しか見えなかった。サロン本人の手動取り込み（`POST /salonboard/import`・
+`trigger='manual_salon'`）も同じ扱い。
 
 ### 運営・連携単位・店舗CRUD API（`requireAdmin`）
 
@@ -674,14 +694,30 @@ SMS/メール本文・Stripe 明細に出す店舗名/住所は次の順で解�
   - unit `salonboard-login`: 認証拒否は 1 試行のみ、遮断疑いは新 runId で 1 回だけ引き直し（ジッタあり）、
     引き直し成功で継続、再失敗で `loginBlocked`、総予算切れ・最低試行予算不足では引き直さない。
   - unit `slack-notifier`: 送信経路の解決（BotToken / Webhook / no-op）、投稿失敗（reject / HTTP エラー /
-    `ok:false`）でも throw しない、`NODE_ENV=test` で実送信しない。
+    `ok:false`）でも throw しない、`NODE_ENV=test` で実送信しない、連続投稿の 1 秒間隔と HTTP 429 の
+    `Retry-After` 尊重で 1 回だけ再送すること（429 以外は再送しない）。
+  - unit `salonboard-import-notify`: 通知本文の全パターン（実行経路 3 × 連携単位 2 × 種別 2 の 12 通り +
+    バッチ起動失敗 + 集約通知）。理由コード → 種別の写像（全 14 コード + 理由なし + 未知）、スキップ系理由の
+    混入除外、代表種別の優先順、結果行の出し分けと境界値（10/11 店舗）、投稿上限の境界値（10/11 社）、
+    生エラー・診断・ロググループを本文へ載せないこと、mrkdwn エスケープ、本番以外でメンションしないこと。
+  - unit `batch-import-failure-notify`: 取り込みアクションの例外で ⑬ が 1 通だけ投稿されること
+    （ECS(CLI) は終了コード 1・batch Lambda handler は再送出）、投稿 reject / Sentry flush reject でも
+    終了コード 1 が崩れないこと、取り込み以外のアクションの失敗では ⑬ を投稿しないこと。
+  - unit `deploy-slack-notify-env`: 3 デプロイスクリプトの env 配布（`SLACK_ENGINEER_MENTION_ID` と
+    環境名から導出する `ADMIN_URL`、ECS の実秘密混入ガード、`BATCH_LOG_GROUP` を注入しないこと）。
   - e2e `salonboard-import-retry`: 店舗遷移/一覧取得の一過性失敗（timeout / proxy_error）を新セッションで
     1 回だけ引き直して復旧すること、再失敗は当該店舗のみ失敗計上（`attempts=2`・他店舗は継続）、CAPTCHA と
     理由分類できない失敗は引き直さないこと、引き直し上限（2 回/実行）到達後は再試行しないこと、
     引き直しの再ログイン失敗で残り店舗を同理由で打ち切ること、店舗単位連携でも引き直すこと。
   - e2e `salonboard-import-observability`: 会社単位=会社ごと 1 行 / 店舗単位=店舗ごと 1 行の構造化 JSON、
-    Sentry のタグ・fingerprint・診断コンテキスト、Sentry 送信失敗でも取り込み継続、失敗ありで Slack 1 通・
-    全件成功なら投稿なし・投稿失敗でもサマリ不変、`login_blocked` の計上と確定理由に含めないこと。
+    Sentry のタグ・fingerprint・診断コンテキスト、Sentry 送信失敗でも取り込み継続、`login_blocked` の計上と
+    確定理由に含めないこと。Slack は **3 社失敗で 3 通・各本文が自社名だけを含むこと**、全件成功と
+    連携設定未完了のみでは投稿しないこと、2 社目の投稿失敗でも 3 社目が投稿されサマリが不変であること、
+    会社ランの例外で会社名・連携単位が保たれること、⑬ の 2 経路（連携会社一覧の取得失敗 / 会社ループ途中の
+    claim 失敗）で ⑬ の 1 通だけが飛ぶこと。
+  - e2e `salonboard-import-invoke-failure`: 手動取り込みの非同期 invoke 失敗で実行履歴が failed で解放され、
+    ⑬ が「当該会社の取り込みが未実行です」の影響範囲で投稿されること。会社名が引けなくても申請 ID で
+    投稿すること、Slack 投稿が失敗しても throw しないこと（呼び出し元の API 応答が変わらない）。
   - unit `salonboard-shop-verify`: `decideShopVerify` の「件数（0/1/2以上）× 実効単位 × 一致リンク有無」網羅、
     店舗1件が会社アカウント扱いになること（会社/対象店舗の指定が無い検証では救済しない）。
     **1件パスの住所スクレイピングテストは救済成立ケースの e2e へ移設**（DB シードが要るため）。

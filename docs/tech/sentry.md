@@ -72,7 +72,7 @@ API は `src/observability/sentry.ts` の純関数で二重に防御する（`be
   | `import.reason` | `login_failed` / `login_blocked` / `captcha_detected` / `proxy_error` / `timeout` |
   | `import.unit` | `company`（会社単位連携） / `shop`（店舗単位連携） |
   | `import.applicationId` | 申請 ID |
-  | `import.trigger` | `manual`（手動） / `scheduled`（日次） |
+  | `import.trigger` | `scheduled`（日次） / `manual_admin`（運営の手動） / `manual_salon`（サロン本人の手動） / `manual`（旧値。#64 以前の手動実行） |
   | `import.route` | `lambda` / `ecs` / `local`（`resolveExecutionRoute`） |
 
 - **fingerprint**: `['salonboard-import', 'login-failure', reason]` = **失敗理由ごとに 1 Issue へ集約**する。
