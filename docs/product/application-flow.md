@@ -102,6 +102,9 @@ LP申込で入力ミス・他人のメールアドレスでの申込を弾くた
 - 運営者が申請内容を確認 → 承認 / 却下
 - 承認時: ステータスを `Stripe登録待ち` に更新し、サロンに Stripe Connect 用メール送信
   - メール送信: SES (ap-northeast-1)
+  - 案内メール（件名 `【キャンセル請求便】Stripe登録のご案内`）には Stripe 登録リンクに加えて
+    **サロン様向けご利用マニュアル URL**（Notion）を同梱し、登録手順でつまずいたサロンが自己解決できるようにする
+    （#65。`updateApplicationStatus` の本文のみ。Stripeリンク再送 `send-stripe-link` の本文は対象外）
   - 初期パスワード（ユーザーポータルログイン用）の発番は Stripe オンボーディング完了（`account.updated` webhook）時
 - **未認証申込のロック**: `unverified` の申請は一覧に表示されるが審査アクション（審査通過/却下）を提示しない
   （admin は `getAvailableStatusActions` の default `[]`、API は `updateApplicationStatus` のガードで二重防御。
