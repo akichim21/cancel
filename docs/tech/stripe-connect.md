@@ -20,9 +20,11 @@
 
 1. 運営者が管理画面で申請を承認
 2. API が Stripe Connect で Express account を作成 → Account Link を発行
+   - 承認は `PUT /applications/:id/status`（`updateApplicationStatus`、`status=approved`）に一本化している。
+     旧・専用ルート `POST /applications/:id/approve`（`approveApplication`）は呼び出し元が無く削除済み。
    - 作成時に **入金スケジュールを `manual` に設定**する（GTSS-854 / #33）。共有定数
-     `src/constants/payout.ts` の `PAYOUT_SCHEDULE = { interval:'manual' }` を承認 2 経路
-     （`approveApplication` / `updateApplicationStatus`）の `settings.payouts.schedule` へ同一付与する。
+     `src/constants/payout.ts` の `PAYOUT_SCHEDULE = { interval:'manual' }` を
+     `updateApplicationStatus` の `settings.payouts.schedule` へ付与する。
      `delay_days` は指定しない（JP 既定＝最短 4 営業日を維持）。入金は月次バッチが制御する（後述「入金（payout）」）。
 3. サロンにメール送信（リンク有効期限はデフォルト数分）
 4. サロンがリンクを開く → Stripe ホストの本人確認・銀行口座登録フローへ
