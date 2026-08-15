@@ -33,6 +33,22 @@
    - `true` → ステータス `利用中`、ユーザーポータル誘導
    - `false` → 未完了画面（`/stripe-refresh` で Account Link 再発行）
 
+> **非同期に送るメールには Account Link を直接載せない**（GTSS-909 / #67）。Account Link は
+> **単回利用かつ短時間で失効**する（数分〜数時間）。承認直後の初回案内メールは「発行 → 即送信」なので
+> リンクを本文に載せているが、**バッチ・スケジューラなど発行から閲覧までに時間が空く経路では、
+> 送信時に発行した URL はメールが読まれる頃にほぼ確実に失効している**。
+> そうした経路では本文に LP の `{LP}/stripe-refresh?applicationId=…` を載せ、
+> **サロンがクリックした時点で新しい Account Link を発行する**こと（`POST /applications/:id/stripe-account-link`。
+> 未認証で呼べる公開エンドポイント）。Stripe 登録の自動リマインド（3日後・7日後）はこの方式を採っている。
+>
+> なお現行の初回案内メール本文にある「※このリンクは24時間のみ有効です。」は**事実と食い違っている**
+> （実際の失効は数分〜数時間）。訂正は GTSS-909 のスコープ外で、別 Issue 化を推奨する。
+
+> **`active` への遷移条件は `charges_enabled`**。`details_submitted` は「サロンが提出を終えた」ことを
+> 示すだけで Stripe の確認完了を意味しない（`pending_verification` が残りうる）。実際にステータスを
+> `active` へ進めているのは下記 `account.updated` webhook の `charges_enabled` 判定であり、
+> 自動リマインドの完了判定（送信停止）も同じ `charges_enabled` を使って基準を揃えている。
+
 ## Webhook
 
 `cancel-billing-service-api/src/lambda.ts` で受信。
@@ -271,8 +287,13 @@ dev 環境は **必ずテストキー** (`sk_test_`) を使うこと。
 
 **Stripe リンクが切れている**
 
-- Account Link は有効期限が短い（数分〜数時間）
-- `/stripe-refresh` で再発行（`StripeRefresh.jsx`）
+- Account Link は**単回利用かつ有効期限が短い**（数分〜数時間）。メール本文の「24時間有効」表記は
+  実態と食い違っているため信用しないこと
+- `/stripe-refresh?applicationId=…` で再発行（`StripeRefresh.jsx`。ボタン押下時に
+  `POST /applications/:id/stripe-account-link` を叩いて新しいリンクを発行し Stripe へ遷移する）
+- サロンへ案内する URL は**この再開ページ**を渡す（Account Link の URL をコピーして渡さない。
+  渡した時点で失効している可能性が高く、単回利用のため一度誰かが開いたら二度目は使えない）
+- Stripe 登録の自動リマインドメール（GTSS-909 / #67・3日後/7日後）も同じ再開ページへ誘導している
 
 **Webhook 署名検証エラー**
 
