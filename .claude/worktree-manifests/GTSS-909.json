@@ -13,9 +13,10 @@
   "repos": {
     "cancel-billing-service-api": {
       "hasWorktree": true,
-      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-909",
-      "branch": "GTSS-909",
-      "baseBranch": "origin/develop"
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-909-v2",
+      "branch": "GTSS-909-v2",
+      "baseBranch": "origin/main",
+      "note": "旧ブランチ GTSS-909 は origin/develop 起点だったため、origin/main 起点の GTSS-909-v2 へ作り直した（api PR 54 をクローズし 55 で差し替え）"
     },
     "cancel-billing-service": {
       "hasWorktree": false
