@@ -45,6 +45,7 @@
 | `STRIPE_WEBHOOK_SECRET` | Webhook 署名検証（必須） |
 | `JWT_SECRET` | JWT 署名 |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `TWILIO_MESSAGING_SERVICE_SID` | SMS 送信 |
+| `TWILIO_SENDER_ID` | 顧客宛 SMS の送信元表示に使う英字送信者名（`Cancel Pay`。GTSS-920）。11 文字以内・英数字と半角スペースのみ・英字を 1 文字以上。未設定なら海外番号のまま |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | prod のみ。SES SMTP 認証 |
 | `CORS_ORIGIN` | カンマ区切り許可オリジン |
 | `DYNAMODB_TABLE_NAME` | 申請テーブル名（dev/prod 切替） |

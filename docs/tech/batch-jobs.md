@@ -131,6 +131,11 @@ aws lambda invoke \
     止まり、サロンボード取り込みのデプロイまで巻き込むため）。**ECS 経路でリマインドを動かす前に**
     infra へ `TWILIO_ACCOUNT_SID` / `TWILIO_MESSAGING_SERVICE_SID` を追加し、スクリプトの警告を
     ハードガードへ戻すこと（`buildspec-batch.yml` の env 契約も併せて更新）。
+- **送信元表示（GTSS-920）**: リマインド SMS の送信元は環境変数 `TWILIO_SENDER_ID`（英字送信者名
+  `Cancel Pay`）で決まり、初回請求 SMS・支払い完了 SMS と同じ `utils/sms.ts` の `buildSmsParams` を通る。
+  **未注入なら送信元だけが従来の海外番号（`+1`）へ静かに戻る**（送信は成功するので失敗記録に残らない）。
+  Lambda / ECS の両経路とも他の `TWILIO_*` と同じ場所へ注入すること。書式違反の値は
+  `scripts/twilio-sender-id-guard.sh` がデプロイ時に検査して中断する。
 - **ログ**: 実行ごとに `[billing-reminders] summary:`（対象件数・回別・チャネル別成否）を構造化出力。
 
 ```bash

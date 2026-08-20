@@ -131,6 +131,28 @@ DB 保存値は英語 enum、表示は日本語ラベル（`cancel-billing-servi
     再構成は v3 で行構成そのものが変わるため、**版別に組み立てを分けている**（`SMS_BODY_BY_VERSION`）。
     リリース前に送った v1 / v2 の記録は従来の 4 行構成のまま再構成される（過去の証跡は変わらない）。
   - **SMS の文字数は増えない**（初回 −2 文字 / リマインド −1 文字。改行 3 個が空白 1 個に置き換わるため）。
+- **顧客宛 SMS の送信元は英字送信者名「Cancel Pay」で表示する**（GTSS-920 / 2026-08-20 社内合意）。
+  Twilio の国際ゲートウェイ経由だと受信者の端末には米国（`+1`）の電話番号が出る。海外番号からの
+  「キャンセル料のお支払い」SMS は迷惑 SMS・詐欺と誤認されやすく、開封されない／リンクが踏まれない／
+  支払いが遅れる／「本物か」という問い合わせが出る温床になるため、送信元表示だけを英字送信者名
+  （Alphanumeric Sender ID）へ変更する。
+  - 対象は **顧客へ送る SMS 3 種すべて**（初回請求 SMS・リマインド SMS・支払い完了 SMS）。種類によって
+    送信元が変わらないよう、送信元の解決は `utils/sms.ts` の `buildSmsParams` **1 箇所だけ**が持つ。
+  - **本文・差し込み項目・支払いリンク・送信タイミング・送信条件（email/sms/both）は一切変えない**。
+    変わるのは受信者の端末に出る送信元表示のみ（画面変更なし）。
+  - 「Cancel Pay」は 10 文字で Twilio の上限 11 文字以内（英数字と半角スペースのみ・英字を 1 文字以上）。
+    事前登録なしで英字表示できることはグループ別サービス（`SHAiREDEV`）の送信実績で確認済み。
+  - **/pay 短縮 URL は維持される**。Twilio は `messagingServiceSid` と `from` を両方指定すると自動送信元
+    選択だけを止め、Link Shortening（`shortenUrls`）は効いたままになるため、リンクが伸びてセグメント数
+    ＝送信コストが増えることはない。
+  - **英字送信者名の SMS は受信専用（返信不可）**。また切替タイミングをまたぐ請求では、初回 SMS（旧＝
+    海外番号）とリマインド・完了 SMS（新＝Cancel Pay）が受信者の SMS アプリ上で**別スレッド**に表示される
+    （CS 想定問答に記載すること）。支払いリンクはどちらのスレッドのものも有効。
+  - 設定は環境変数 `TWILIO_SENDER_ID`（dev / prod 両方）。**未設定なら従来どおり Messaging Service の
+    自動選択（＝海外番号）へフォールバックし、送信自体は成功する**。書式違反の値も同じくフォールバック
+    するため、デプロイ時に `scripts/twilio-sender-id-guard.sh` が書式を検査して中断する
+    （送信は成功するので、送信元だけ戻る事故は失敗記録にも残らず気づけない）。
+  - 国内直収 SMS 事業者への切替は本件では行わない（国内直収は送信元が電話番号表示になり目的に合わない）。
 - **決済リンク生成時に、連結アカウント上へ「言語＝日本語」の顧客情報（Stripe Customer）を作成して紐づける**
   （GTSS-850 #42）。Stripe の領収書メールを日本語テンプレートで送るための措置で、**顧客メールアドレスの
   登録有無に関わらず必ず作成する**（メールがあれば顧客情報にも設定する）。顧客情報の作成に失敗した場合は
@@ -447,6 +469,7 @@ CSVはクライアント側で生成し、画面の絞り込み結果（`filtere
 | `cancel-billing-service-api/src/repositories/cancellation-notifications.repository.ts` | 送信履歴（claim/finalize/集約） |
 | `cancel-billing-service-api/src/utils/jst-date.ts` | JST 暦日判定の集約（経過日数・期日境界・翌月末日・期限切れ導出） |
 | `cancel-billing-service-api/src/services/notification.service.ts` | 顧客宛メール／SMS の文面テンプレート・テンプレート版定数（`NOTIFICATION_TEMPLATE_VERSION`） |
+| `cancel-billing-service-api/src/utils/sms.ts` | SMS セグメント数の推定＋**送信元（英字送信者名 / Messaging Service / 発信番号）の解決**（`buildSmsParams`。GTSS-920。顧客宛 SMS 3 種はすべてここを通す） |
 | `cancel-billing-service-api/src/utils/appointment-datetime.ts` | 本文へ差し込む予約日時の整形（GTSS-896。**唯一の実装**。結果を `notificationAppointmentPrefix` として admin へ返す） |
 | `cancel-billing-service-admin/src/constants/cancellationNotifications.ts` | 送信履歴タイムライン・**テンプレート版別の文面再構成**（`SUPPORTED_TEMPLATE_VERSIONS`） |
 | `cancel-billing-service-admin/src/components/CancellationManagement.tsx` | 管理画面一覧・取り込み・送信・**店舗 select** |
