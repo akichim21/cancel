@@ -28,6 +28,7 @@ docs/
 | `product/overview.md` | サービス全体像 |
 | `product/application-flow.md` | サロン申請〜利用開始フロー |
 | `product/cancellation-flow.md` | キャンセル請求フロー |
+| `product/admin-users.md` | 運営管理者アカウントのライフサイクル・管理画面仕様 |
 | `tech/architecture.md` | システム全体アーキテクチャ |
 | `tech/auth.md` | JWT 認証フロー |
 | `tech/deployment.md` | デプロイ手順・AWS リソース一覧 |

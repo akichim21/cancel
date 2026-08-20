@@ -37,6 +37,22 @@ JWT（JSON Web Token）。`jsonwebtoken` ライブラリで発行・検証。
 手コピーで二重実装すると、片方（例えば login）にだけ条件が増えたときに `change-password` が
 「ログイン条件を迂回するトークン発行口」へ逆戻りする。**条件を増やすときは必ずこの関数を直すこと。**
 
+管理者側（`users` / `role='admin'`）も同じ構図なので、判定を
+**`services/admin-account.service.ts` の `isActiveAdmin(user)` / `findActiveAdmin(id)`** へ集約する
+（GTSS-72 / #72）。この条件（`role='admin'` かつ `status='active'`）を見る経路は 6 つある。
+
+| 経路 | 満たさないときの応答 |
+|---|---|
+| `requireAdmin`（middleware） | 401「このアカウントは無効です」 |
+| `adminLogin` | 403（`status` なら「このアカウントはまだ有効化されていません」/ `role` なら「管理者権限がありません」。**現行文言のまま**） |
+| `POST /admin/users/:id/password-email` | 404（非 admin・不在）/ 400（inactive） |
+| `POST /auth/admin-forgot-password` | 200（列挙対策で成功と同一） |
+| `POST /auth/admin-reset-password` | 403「このアカウントは無効です」 |
+| `POST /auth/admin-change-password` | 403「このアカウントは無効です」 |
+
+**応答コードは経路ごとに異なってよいが、判定条件そのものを経路側に書かない。**
+条件を増やすときはこの関数だけを直す。
+
 ### パスワード変更による旧トークンの失効（`password_changed_at`）
 
 署名と `exp` しか見ない検証では、パスワードを変更しても**変更前に発行されたトークンが最大 24 時間
@@ -45,9 +61,12 @@ JWT（JSON Web Token）。`jsonwebtoken` ライブラリで発行・検証。
 
 - `application_users.password_changed_at`（ISO8601 / nullable）に最終変更時刻を記録する。
   書き込むのは `change-password` と `reset-password` の 2 経路（`updated_at` と同一時刻を使う）。
-- 判定は `middleware/auth.ts` の **`isTokenStaleForUser(decoded, appUser)`**。`decoded.iat` が
-  `password_changed_at` より前なら失効扱いにする。適用箇所は `requireAuth`（全保護 API）と
+- 判定は `middleware/auth.ts` の **`isTokenIssuedBefore(decoded, changedAt)`**。`decoded.iat` が
+  基準時刻より前なら失効扱いにする。適用箇所は `requireAuth`（全保護 API）と
   `changePassword` 自身（トークン発行口を旧トークンで再利用させない）。
+  **サロン側と管理者側で同じ関数を共有する**（GTSS-72 / #72）。基準時刻の列名だけが異なるため
+  （サロン = `application_users.password_changed_at` / 管理者 = `users.last_password_change`）、
+  列ではなく「基準時刻そのもの」を引数で受け取る。片方にだけ条件が増えて非対称になるのを防ぐ。
 - `iat` は秒精度のため `password_changed_at` も秒へ切り捨て、`<` で比較する（**同一秒は有効**）。
   変更直後に発行する新トークンを自分で失効させないための境界。
 - `password_changed_at` が NULL（既存行 / 一度も変更していない）なら失効させない。
@@ -116,19 +135,33 @@ Sentry のブラウザ SDK は console breadcrumb を既定で有効にするた
 - 別タブ・別デバイスの `mustChangePassword` は stale になりうる（`AuthContext` は `storage` イベントを
   購読していない）。リロードまたは再ログインで解消する。トークンはリクエストごとに localStorage から
   読むため、別タブでも新トークンへ自動追随し API 呼び出しは壊れない。
-- 管理者（`users` テーブル）側には `password_changed_at` 相当が無い。`requireAdmin` は DB を引かない
-  設計のため、失効判定を入れるとリクエストごとの DB アクセスが増える。管理者アカウント数が増えた
-  段階で再評価する。
+- ~~管理者（`users` テーブル）側には `password_changed_at` 相当が無い。`requireAdmin` は DB を引かない~~
+  **解消済み（GTSS-72 / #72）**。管理者を画面から無効化できるようにするにあたり、`requireAdmin` を
+  DB 検証ありへ変更した（後述「管理画面のログイン」）。基準時刻は既存の
+  `users.last_password_change` 列を再利用する。補足:
+  - **書き込みトリガがサロン側と非対称**。サロン = `change-password` / `reset-password` の 2 経路、
+    管理者 = 本人のパスワード変更 / リンクからの設定・再設定 / **無効化** の 3 経路。
+  - 列名は `last_password_change` のままだが、実態は「発行済み JWT の失効基準時刻」。
+    リネームは別 Issue とする。
+  - 無効化 → 再有効化した管理者の旧トークンは
+    「パスワードが変更されています。再度ログインしてください」で弾かれる。パスワードは変わっていないが、
+    「再ログインで復帰できる」ことを伝える区別としては整合する。
 
 ## トークン方式の比較（パスワード再設定 / メール認証）
 
-「ランダム hex トークン＋有効期限＋DB保存＋トークン検証」を共有する 2 系統がある。保存先テーブルと
-エンドポイント・戻り先 URL が異なる。
+「ランダム hex トークン＋有効期限＋DB保存＋トークン検証」を共有する 3 系統がある。保存先テーブル・
+**保存形式**・エンドポイント・戻り先 URL が異なる。
 
-| 用途 | トークン保存先 | 発行 | 有効期限 | 検証エンドポイント | 戻り先 URL |
-|---|---|---|---|---|---|
-| パスワード再設定 | `application_users.reset_token` / `reset_token_expiry` | `crypto.randomBytes(32).hex` | 発行+24h | `POST /auth/reset-password` | `{ユーザーポータル}/reset-password?token=` |
-| メール認証（GTSS-842 / #31） | `applications.verification_token` / `verification_token_expiry` | `crypto.randomBytes(32).hex` | 発行+24h | `POST /applications/verify-email` | `{LP}/verify-email?token=` |
+| 用途 | トークン保存先 | **保存形式** | 発行 | 有効期限 | 検証エンドポイント | 戻り先 URL |
+|---|---|---|---|---|---|---|
+| パスワード再設定（サロン） | `application_users.reset_token` / `reset_token_expiry` | **平文（残課題）** | `crypto.randomBytes(32).hex` | 発行+24h | `POST /auth/reset-password` | `{ユーザーポータル}/reset-password?token=` |
+| メール認証（GTSS-842 / #31） | `applications.verification_token` / `verification_token_expiry` | **平文（残課題）** | `crypto.randomBytes(32).hex` | 発行+24h | `POST /applications/verify-email` | `{LP}/verify-email?token=` |
+| パスワード設定/再設定（管理者。GTSS-72 / #72） | `users.reset_token_hash` / `reset_token_expiry` | **SHA-256 ダイジェスト** | `crypto.randomBytes(32).hex`（平文はメールのリンクのみ） | 発行+24h | `POST /auth/admin-reset-password` | `{管理画面}/set-password?token=` または `/reset-password?token=` |
+
+**保存形式の非対称は意図的**。管理者のトークンは管理者権限を取得できる bearer 相当の値で、DB の
+読み取り権限が漏れた時点で管理者乗っ取りに直結するため、平文を保存しない（列名 `reset_token_hash` も
+それを表す）。「サロン側と対称にする」ことは安全性を下げる理由にならないので非対称を許容する。
+**列を足さずに行だけ追加すると、この非対称が表から読み取れず、次に読む人が新経路を平文で実装する。**
 
 ### メール認証トークン（GTSS-842 / #31）
 
@@ -154,17 +187,90 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
 - dev 環境の初期管理者:
   - ID: `a.hayashida@shairesalon-go.today`
   - PW: `TempPassword123!`
+- **管理者アカウントは管理画面から追加できる**（GTSS-72 / #72。`/admin-users`）。運用手順と画面仕様は
+  `docs/product/admin-users.md`。CLI（`scripts/upsert-admin-user.ts`）は緊急復旧手段として残す。
+
+### 管理者のパスワード導線（GTSS-72 / #72）
+
+**パスワードは管理画面の入力欄では設定させない。** 平文が第三者（作成した運営者）を経由しないよう、
+メールリンク経由で本人に設定させる。
+
+| 導線 | エンドポイント | 認可 | 画面 |
+|---|---|---|---|
+| 招待 / 再送（運営が送る） | `POST /admin/users/:id/password-email` | requireAdmin | 管理者編集モーダル |
+| パスワードを忘れた（本人が申請） | `POST /auth/admin-forgot-password` | 無認可 | `/forgot-password` |
+| リンクからの設定・再設定 | `POST /auth/admin-reset-password` | 無認可 | `/set-password` / `/reset-password` |
+| ログイン中の本人による変更 | `POST /auth/admin-change-password` | requireAdmin | `/change-password` |
+
+- トークンは `users.reset_token_hash`（SHA-256 ダイジェスト）+ `users.reset_token_expiry`（発行+24h）。
+  **リンクは 1 回きり**で、消費は「ダイジェストが一致する行に対してのみ」という条件付き UPDATE 1 文で
+  原子的に行う（read-then-update だと同一リンクの同時オープンで二重消費される）。
+- **メールを送っただけでは既存パスワードを無効化しない。** 誤操作で管理者を締め出さないため。
+  再送すると以前のリンクだけが無効になる。
+- 未使用トークンは **メールアドレス変更 / 無効化 / 本人のパスワード変更** で同時に失効させる。
+- `POST /auth/admin-forgot-password` は**アカウントの実在有無・メール送信の成否によらず常に 200**
+  （列挙対策）。失敗はサーバーログにのみ残す。**画面はレスポンス本文で分岐してはならない。**
+
+### `requireAdmin` の DB 検証（GTSS-72 / #72 / REQ-7）
+
+トークン検証に成功したあと `users` を `sub` で引き、`isActiveAdmin` を満たす場合だけ通す。
+
+1. トークン不在 / 不正 → 401（**英語のまま**。既存クライアントの契約を変えない）
+2. `role` クレームが `admin` でない → 403 `{ error: 'Forbidden', message: 'Admin role required' }`
+   （**必ず DB へ到達する前に判定する**。`getCancellation` は `requireAdmin` → `requireAuth` の
+   二段構えで、サロンユーザーの `GET /cancellations/:id` は必ずここを 1 度通る。DB を引くと
+   サロン側ホットパスに空振りの Aurora Data API 往復が 1 回増える）
+3. 行なし / DB の `role` が非 admin / `status` が非 active → 401「このアカウントは無効です」
+4. `last_password_change` より前に発行された `iat` → 401「パスワードが変更されています。再度ログインしてください」
+   （秒精度・**同一秒は有効**。NULL は失効させない）
+5. DB アクセス失敗 → 500
+
+`requireAdmin` は **async** で、戻り値は判別可能ユニオン `Promise<AuthGuardResult>`。api の
+`tsconfig` は `strict:false` のため、**戻り値型を明示しないと `await` 付け忘れが型検査を素通りし、
+`authCheck.error` が undefined = falsy になって認可が丸ごと無効になる**。呼び出しは 22 箇所
+（`applications.handler.ts` 6 / `cancellation.service.ts` 6 / `salonboard-auth.service.ts` 9 /
+`cancellation-send.service.ts` 1）で、全経路の無認証 401 回帰テストも置いている。
+
+## 残課題
+
+- **サロン側 `application_users.reset_token` は平文保存のまま**（管理者側だけ GTSS-72 でダイジェスト
+  保存へ移行した）。ダイジェスト保存へ揃えるのは別 Issue とする。同様に
+  `applications.verification_token` も平文。
+- **無認可のパスワード関連エンドポイントにレート制限が無い**
+  （`/auth/forgot-password` / `/auth/reset-password` / `/auth/admin-forgot-password` /
+  `/auth/admin-reset-password`）。総当たり・メール爆撃の対象になりうる。現状この API 群には
+  レート制限の基盤が一切なく、一部だけに導入しても全体の穴は塞がらないため別 Issue とする。
+  応答時間差による列挙も残る（実在アカウントのみ DB 更新とメール送信を行うため）。
+- **ログイン応答は列挙可能**。`POST /auth/admin-login` は「ユーザーが見つかりません」と
+  「パスワードが正しくありません」を出し分ける。統一は別 Issue（既存クライアントの契約と
+  回帰テストを壊さないため GTSS-72 では変えていない）。
+- **パスワードハッシュはソルト無し SHA-256**。GTSS-72 で増えた 3 経路（管理者のパスワード設定・
+  再設定・変更）も既存の `hashPassword` を使う（同一テーブル内でハッシュ形式が混在すると
+  `adminLogin` が壊れるため）。方式移行は Issue #41 の範囲で、**#41 の実装時にこの 3 経路も
+  移行対象へ含めること**。
 
 ## ロール
 
 現状ロールは「サロン」「運営者」の 2 種類で、ログインエンドポイント自体が分かれている（管理画面 API ⇄ サロンポータル API）。RBAC は実装されていない。
 
+管理者の `role` は作成時にサーバーが `admin` で固定し、画面にロール選択は出さない（GTSS-72）。ただし
+**列のガードは外さない**: 移行スクリプト（`scripts/migrate-dynamodb-to-aurora.ts`）は DynamoDB の値を
+そのまま写すため、`users.role` は `admin` 以外や NULL を持ち得る。一覧は `role='admin'` で絞り、
+更新・パスワードメール送信は非 admin 行を 404 で弾く。
+
 ## 関連コード
 
 | ファイル | 役割 |
 |---|---|
-| `cancel-billing-service-api/src/handlers/auth.handler.ts` | `/auth/login`, `/auth/admin-login`, `/auth/me`, `/auth/change-password`, `/auth/forgot-password`, `/auth/reset-password` のルート登録 |
+| `cancel-billing-service-api/src/middleware/auth.ts` | 認証ガード本体（`requireAuth` / `requireAdmin` / `verifyToken` / `isTokenIssuedBefore`）。`AuthGuardResult` 型もここ |
+| `cancel-billing-service-api/src/handlers/auth.handler.ts` | `/auth/login`, `/auth/admin-login`, `/auth/me`, `/auth/change-password`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/admin-me`, `/auth/admin-change-password`, `/auth/admin-forgot-password`, `/auth/admin-reset-password` のルート登録 |
 | `cancel-billing-service-api/src/services/auth.service.ts` | 認証ロジック（ログイン・パスワード再設定トークン発行/検証） |
+| `cancel-billing-service-api/src/services/admin-account.service.ts` | **「管理者として有効か」の唯一の判定**（`isActiveAdmin` / `findActiveAdmin`） |
+| `cancel-billing-service-api/src/services/admin-auth.service.ts` | 管理者のパスワード設定/再設定/変更、トークン発行・メール送信、`admin-me` |
+| `cancel-billing-service-api/src/services/admin-user.service.ts` | 管理者ユーザーの一覧・作成・更新・パスワードメール送信 |
+| `cancel-billing-service-api/src/handlers/admin-users.handler.ts` | `/admin/users` 系のルート登録（すべて `await requireAdmin`） |
+| `cancel-billing-service-api/src/schemas/admin-user.schema.ts` | 管理者ユーザー入力の zod スキーマ・日本語メッセージ・ステータス enum |
 | `cancel-billing-service-api/src/handlers/applications.handler.ts` | `POST /applications/verify-email`（メール認証。無認可） |
 | `cancel-billing-service/src/contexts/AuthContext.tsx` | サロン側 JWT 管理 |
-| `cancel-billing-service-admin/src/services/ApiService.ts` | 管理画面側 JWT 管理 |
+| `cancel-billing-service-admin/src/services/ApiService.ts` | 管理画面側 JWT 管理（`clearStoredSession` / `getStoredAdminUser`。公開ルート・パスワード変更は共通 401 リダイレクトを経由しない） |
+| `cancel-billing-service-admin/src/utils/sentryScrub.ts` | Sentry へ送るイベント・breadcrumb から URL のクエリ（`?token=`）を除去する純関数 |

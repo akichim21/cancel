@@ -121,7 +121,7 @@ cd cancel-billing-service-lp && ./deploy.sh dev        # / prod
 
 **注意**:
 - `STRIPE_SECRET_KEY` には公開鍵 (`pk_`) を絶対に入れない
-- `cancel-billing-service-admin` の API URL 変数は `VITE_API_BASE_URL`（`VITE_API_URL` ではない）
+- `cancel-billing-service-admin` の API URL 変数は `VITE_API_URL`（`VITE_API_BASE_URL` **ではない**。`VITE_API_BASE_URL` を使うのはサロンポータル `cancel-billing-service`）
 - `cancel-billing-service-lp` の API URL 変数は `VITE_API_URL`
 
 ## 個人情報（PII）の取り扱い
@@ -187,5 +187,6 @@ aws sts get-caller-identity --profile cancel-billing-service-prod
 - `docs/product/`: 製品仕様
 - `docs/tech/`: 技術ドキュメント
 - `docs/cancel-billing-service-*/`: 各アプリ固有ドキュメント
+- 運営管理者アカウントの追加は**管理画面から**行う（`docs/product/admin-users.md`）。CLI（`scripts/upsert-admin-user.ts`）は緊急復旧手段
 - `.claude/skills/`: スキル（issue / vitest / qa-patterns 等）
 - `AGENTS.md`: 他AI（Gemini / Codex 等）向けリファレンス（shaire の同名ファイルへのシンボリックリンク。cancel 固有内容を追記する場合は別ファイルへ）

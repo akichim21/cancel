@@ -144,6 +144,30 @@ service 内の純粋関数として切り出しておくことが前提（そう
 - **新テーブルは `helpers/db.js` の `truncateAll()` へ必ず追加する**（対象を明示列挙しているため、
   列挙漏れはテスト間でデータが残り冪等テストが偽陽性・偽陰性を起こす）。
 
+### `truncateAll()` は既定で管理者 1 行を投入する（GTSS-72 / #72）
+
+`requireAdmin` が DB を引くようになったため（`docs/tech/auth.md`）、`adminToken()`（既定
+`sub='admin_uuid_1'`）を使う e2e は `users` に対応する行が無いと 401 になる。`truncateAll()` 自身が
+**既定 admin（`DEFAULT_TEST_ADMIN`。`id='admin_uuid_1'` / `role='admin'` / `status='active'` /
+`email='default-admin@test.invalid'`）を投入する**ことで、呼び出し側 52 箇所を無改修に保っている。
+
+> `beforeEach` に seed 行を足す方式は採れない。`truncateAll()` は `beforeEach` 以外に **`it()` の
+> 本体内でも呼ばれている**（ステータス遷移ループ等）ため、`beforeEach` だけに置くとそれらが壊れる。
+
+```js
+await truncateAll();                              // 既定 admin あり（ほとんどのテストはこれでよい）
+await truncateAll({ seedDefaultAdmin: false });   // 既定 admin なし
+await seedDefaultTestAdmin();                     // 明示的に投入（describe 単位で認証だけ要る場合）
+```
+
+**「有効な管理者の頭数・件数・宛先」を数えるテストでは必ず opt-out すること。** 既定 admin は必ず
+`role='admin'` / `status='active'` になるため 1 行ぶんずれる。とくに「有効な管理者が 0 人になる操作の
+拒否」は条件へ一度も到達せず**ガードが未実装でも緑になる**（＝誤った理由で緑になる）。
+
+判定軸は「SES 呼び出し回数」ではなく **`ToAddresses` の中身**。運営通知は全宛先を 1 通の
+`SendEmailCommand` に集約するため、宛先が増えても呼び出し回数は 1 のままで `toHaveLength(1)` 系の
+アサートは落ちない。opt-out を広く撒きすぎないこと。
+
 **静的検査**（`unit/stripe-onboarding-reminder-contract.test.ts`）: 実行時テストでは検出できない配線漏れを
 固定する。デプロイスクリプトの env / タスク定義 family 契約、送信履歴テーブルの列（PII 非保存）、
 承認経路の本数（経路が増減したら落ちる検知ガード）。
