@@ -26,8 +26,10 @@ description: "Issue を起点に実装を開始する時に使用する skill。
 **--baseオプション（必須）: ベースブランチ名**
 - `--base <branch>` の形式で指定された場合: 全リポジトリのworktree作成時にデフォルトのベースブランチの代わりに指定されたブランチを使用する（BASE_BRANCH_OVERRIDE）
   - 例: `--base feature/GTSS-700` → BASE_BRANCH_OVERRIDE=`feature/GTSS-700`
-- 省略された場合: 各リポジトリのデフォルトベースブランチを使用（Step 2-2のマッピングに従う）
+- 省略された場合: 各リポジトリのデフォルトベースブランチ（= `main`）を使用（Step 2-2のマッピングに従う）
 - **注意**: `--base` は引数のどの位置にあってもパースする（第2引数の前後どちらでも可）
+- **🚫 `develop` を暗黙のベースにすることを禁止する。** ユーザーが `--base develop` と明示的に指定した場合を**除き**、
+  `develop` / `origin/develop` を起点にしてはならない。指定が無ければ必ず `main` を使う（詳細は Step 2-2）
 
 ** 3つの引数全てなければエラーメッセージを返す
 
@@ -39,8 +41,8 @@ description: "Issue を起点に実装を開始する時に使用する skill。
 - `729 fix/hotfix-login --base feature/GTSS-700` → ISSUE_NUMBER=`729`, BRANCH_NAME=`fix/hotfix-login`, BASE_BRANCH_OVERRIDE=`feature/GTSS-700`
 - `https://github.com/akichim21/cancel/issues/729` → ISSUE_NUMBER=`729`, BRANCH_NAME=`feature/GTSS-729`, BASE_BRANCH_OVERRIDE=なし
 - `https://github.com/akichim21/cancel/issues/729 fix/hotfix-login` → ISSUE_NUMBER=`729`, BRANCH_NAME=`fix/hotfix-login`, BASE_BRANCH_OVERRIDE=なし
-- `https://github.com/akichim21/cancel/issues/729 --base develop` → ISSUE_NUMBER=`729`, BRANCH_NAME=`feature/GTSS-729`, BASE_BRANCH_OVERRIDE=`develop`
-- `https://github.com/akichim21/cancel/issues/729 fix/hotfix-login --base develop` → ISSUE_NUMBER=`729`, BRANCH_NAME=`fix/hotfix-login`, BASE_BRANCH_OVERRIDE=`develop`
+- `https://github.com/akichim21/cancel/issues/729 --base develop` → ISSUE_NUMBER=`729`, BRANCH_NAME=`feature/GTSS-729`, BASE_BRANCH_OVERRIDE=`develop`（**`develop` 起点が許されるのはこの明示指定がある場合のみ**）
+- `https://github.com/akichim21/cancel/issues/729 fix/hotfix-login --base develop` → ISSUE_NUMBER=`729`, BRANCH_NAME=`fix/hotfix-login`, BASE_BRANCH_OVERRIDE=`develop`（同上）
 
 以降、`{ISSUE_NUMBER}` と `{BRANCH_NAME}` と `{BASE_BRANCH_OVERRIDE}`（指定時のみ）としてそれぞれ使い分ける。
 worktreeディレクトリ名は `{BRANCH_NAME}` のスラッシュをハイフンに置換した値 `{WORKTREE_DIR}` を使う。
@@ -72,13 +74,24 @@ Step 2の探索結果から、変更が必要なリポジトリを特定する�
 
 #### 2-2: 各リポジトリでworktree作成
 
-デフォルトベースブランチマッピング:
+デフォルトベースブランチマッピング（**全リポジトリ `main` 固定**）:
 - cancel-billing-service-api → `main`
 - cancel-billing-service → `main`
 - cancel-billing-service-admin → `main`
 - cancel-billing-service-lp → `main`
+- 親リポジトリ `cancel`（docs / skills） → `main`
 
 **ベースブランチの決定**: `{BASE_BRANCH_OVERRIDE}` が指定されている場合はそれを使用し、指定されていない場合は上記のデフォルトマッピングを使用する。以降 `{base_branch}` は決定されたベースブランチを指す。
+
+**🚫 develop からのブランチ作成は禁止**
+
+- `{BASE_BRANCH_OVERRIDE}` が未指定なら、起点は**必ず `origin/main`**。`develop` / `origin/develop` を起点にしてはならない
+- `develop` を起点にしてよいのは、ユーザーが `--base develop` と**明示的に指定した場合のみ**
+- ベースに迷ったら `main`。判断がつかなければ勝手に `develop` へ倒さず、ユーザーに確認する
+- `develop` へは PR を `main` へマージしたあと別途取り込む（作業ブランチの起点にはしない）
+- **理由**: `develop` を起点にすると `--base main` の PR diff にマージベース以降の develop 側未リリース分が全て混ざり、
+  レビュー対象の変更が特定できなくなる。GTSS-909 では実変更 20 ファイルが 42 ファイルの diff になり、
+  ブランチを `main` 起点で作り直すことになった
 
 各変更対象リポジトリで以下を実行:
 
@@ -104,6 +117,23 @@ git worktree add .worktrees/{WORKTREE_DIR} -b {BRANCH_NAME} origin/{base_branch}
 # 依存パッケージのインストール（リポジトリごとに手順が異なる）
 cd .worktrees/{WORKTREE_DIR}
 ```
+
+**起点の検証（2b で BASE_BRANCH_OVERRIDE なしの場合は必須）**
+
+worktree 作成直後に、起点が `origin/main` そのものであることを確認する。ズレていたら先へ進まず作り直す:
+
+```bash
+cd /Users/aki/cancel/{repo}/.worktrees/{WORKTREE_DIR}
+if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+  echo "OK: origin/main 起点"
+else
+  echo "NG: origin/main 起点ではない（$(git log --oneline -1)）。develop 等を掴んでいないか確認し、作り直すこと"
+fi
+```
+
+2a（リモートに既存ブランチがある場合）は起点を選べないため、代わりに `git log --oneline origin/main..HEAD` を確認する。
+`Merge branch ... into develop` のような**自分の Issue と無関係なコミットが並んでいたら develop 起点の疑い**があるので、
+先へ進む前にユーザーへ報告する。
 
 **⚠️ 重要: node_modulesのシンボリックリンク禁止**
 `ln -s ../../node_modules node_modules` のようなシンボリックリンクは**絶対に作成しない**。worktree間で依存が共有され、ブランチごとに異なる依存バージョンを扱えなくなるため、必ず各worktreeで独立したnode_modulesをインストールすること。
