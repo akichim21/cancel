@@ -233,12 +233,21 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
   （既存の大文字行の管理者を締め出さず、本番データの事前正規化も要らない）。
   大小文字違いの重複行がありうる（UNIQUE は生の `email` に対するもの）ため、**完全一致を最優先**し、
   無ければ有効な管理者を優先して 1 行へ畳む。
-- **DB 例外を `console.error(error)` でそのまま出さない**（`utils/log-error.ts` の `logError` を使う。
-  #72 レビュー指摘 4）。drizzle-orm 0.45 は `DrizzleQueryError` の message に SQL と**バインド値**を
-  連結するため（`pg-core` は node-postgres と aws-data-api の共通層なので本番も同じ）、
-  パスワードハッシュ・トークンダイジェスト・メールアドレスが CloudWatch に平文で残る。
+- **認証・パスワード系の catch では DB 例外を `console.error(error)` でそのまま出さない**
+  （`utils/log-error.ts` の `logError` を使う。#72 レビュー指摘 4）。drizzle-orm 0.45 は
+  `DrizzleQueryError` の message に SQL と**バインド値**を連結するため（`pg-core` は node-postgres と
+  aws-data-api の共通層なので本番も同じ）、パスワードハッシュ・**平文の `reset_token`**（サロン側）・
+  トークンダイジェスト・メールアドレスが CloudWatch に平文で残る。
   ハッシュがソルト無し SHA-256（Issue #41）である以上「ハッシュだから平気」は成り立たず、
   Aurora のオートポーズ復帰失敗で catch に到達すること自体が現実に起きる。
+  `logError` は message / stack / params を出さず、**原因側の例外名・SQLSTATE・AWS の requestId**
+  だけを出す（`DrizzleQueryError` は `name` を設定しないので、原因側を見ないと `Error` としか出ない）。
+  - **移行済み**: `middleware/auth.ts` の `requireAdmin` / `requireAuth`、`auth.service.ts` の
+    adminLogin / change-password / forgot / reset、`admin-auth.service.ts`、`admin-user.service.ts`。
+    あわせて `adminLogin` の「入力メールアドレスを常時 `console.log` する」行も削除した。
+  - **未移行（別 Issue）**: `cancellation.service.ts` / `cancellation-send.service.ts` /
+    `notification.service.ts` など 30 箇所強。これらのバインド値には**顧客の氏名・電話・メール**が
+    載るため本来は同じ扱いが要るが、決済・通知の広範囲に及ぶので GTSS-72 には含めていない。
 
 ### `requireAdmin` の DB 検証（GTSS-72 / #72 / REQ-7）
 
