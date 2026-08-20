@@ -68,10 +68,25 @@ EventBridge Scheduler ──(RunTask + task定義: action別 command)──> ECS
 イメージは **単一**（`playwright-core` は依存ゼロ・自己完結なので runtime ステージへコピー、Chromium は
 `playwright-core install --with-deps chromium` で導入）。アクションは **タスク定義の `command` で出し分ける**
 （EventBridge Scheduler の ECS ターゲットは container command override を渡せないため、アクション別に
-タスク定義 family を分ける — `*-payouts` / `*-import` / `*-reminders`（GTSS-886 自動リマインド。正午 cron）。
+タスク定義 family を分ける — `*-payouts` / `*-import` / `*-reminders`（GTSS-886 自動リマインド。正午 cron）/
+`*-stripe_reminders`（GTSS-909 / #67 Stripe オンボーディング自動リマインド。JST 10:00 cron）。
 `*-reminders` は SES/Twilio を使うため `TWILIO_ACCOUNT_SID` 等の env と `TWILIO_AUTH_TOKEN` の
 secrets(valueFrom=SSM)、/pay 短縮 URL 用の `API_BASE_URL` の注入が必要）。秘密（`STRIPE_SECRET_KEY`/`AURORA_*`/`CREDENTIALS_KMS_KEY_ID`
 等）は **イメージに焼かず** タスク定義の environment として注入する。
+
+> **新しい family を足すときは 2 箇所への登録が必須**（片方だけだと静かに壊れる）:
+> 1. Terraform `modules/batch-fargate` の `local.batch_actions` — family 名は `${var.name_prefix}-${each.key}`
+>    でキーから作られる。**タスク定義は `for_each = local.batch_actions`（enabled で絞らない）で常に全アクション分
+>    作られる**ので、スケジュール無効でも手動 RunTask で単発実行できる。`container_secrets` はモジュール共通の
+>    `local.container_secrets` を全 family に配線するため、`STRIPE_SECRET_KEY` は新 family にも自動で入る。
+> 2. `cancel-billing-service-api/deploy-batch-ecs.sh` の `FAMILIES` 配列 — **ここに無い family は register
+>    ループの対象外**になり、タスク定義のイメージが永久に bootstrap プレースホルダのまま残る。
+>    値は Terraform のキーと**完全一致**させること（例: キー `stripe_reminders` → `"${PREFIX}-stripe_reminders"`）。
+>
+> **順序**: Terraform が family を作る前に API 側のデプロイが走ると、`deploy-batch-ecs.sh` の `describe` が
+> 失敗する。逆に Terraform だけ適用してもイメージは bootstrap のまま。**infra apply → コードデプロイ**の順で、
+> できれば同じ作業枠で連続して行う（Scheduler は ENABLED のままでよい。間に発火しても日次・冪等なので
+> 1 回失敗するだけで翌日以降に自然回復する）。
 
 ## 実行環境（裏取り済み）
 
@@ -97,7 +112,8 @@ secrets(valueFrom=SSM)、/pay 短縮 URL 用の `API_BASE_URL` の注入が必�
 ## デプロイとロールバック
 
 - **デプロイ**: `deploy-batch-ecs.sh [env]` が `docker build`（`Dockerfile.batch`）→ ECR push →
-  各 family（`*-payouts` / `*-import`）のタスク定義を `describe → image/env 差し替え → register` する。Terraform は
+  各 family（`FAMILIES` 配列: `*-payouts` / `*-import` / `*-reminders` / `*-stripe_reminders`）の
+  タスク定義を `describe → image/env 差し替え → register` する。Terraform は
   スケルトン（タスク定義・ネットワーク・IAM・Scheduler）を所有し、イメージタグ・環境変数はデプロイスクリプトが所有
   （現行 batch Lambda の「placeholder を TF、コード/env をスクリプト（lifecycle ignore）」の所有分割を踏襲）。
   Lambda 版 `deploy-batch.sh` はロールバック用に温存する。

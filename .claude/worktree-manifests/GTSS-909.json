@@ -1,0 +1,35 @@
+{
+  "issueNumber": 67,
+  "branchName": "GTSS-909-v2",
+  "baseBranchOverride": null,
+  "worktreeDir": "GTSS-909-v2",
+  "slot": 4,
+  "ports": {
+    "api": 1342,
+    "admin": 3004,
+    "userPortal": 5177,
+    "lp": 5277
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-909-v2",
+      "branch": "GTSS-909-v2",
+      "baseBranch": "origin/main",
+      "note": "旧ブランチ GTSS-909 は origin/develop 起点だったため origin/main 起点で作り直した（api PR 54 をクローズし 55 で差し替え）"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-lp/.worktrees/GTSS-909-v2",
+      "branch": "GTSS-909-v2",
+      "baseBranch": "origin/main",
+      "note": "旧 GTSS-909 は develop へマージ済み（lp PR 15）でリモートブランチが削除されていたため、同一コミットを GTSS-909-v2 として push し main 向け PR 16 を作成"
+    }
+  }
+}

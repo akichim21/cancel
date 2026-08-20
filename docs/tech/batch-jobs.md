@@ -35,6 +35,7 @@ batch Lambda は `event.action` で処理を振り分ける（未知 action は�
 | `salonboard-import` | `{ "action": "salonboard-import" }` | EventBridge Scheduler（毎日 JST 0:10）/ API から非同期委譲 |
 | `run-monthly-payouts` | `{ "action": "run-monthly-payouts" }` | EventBridge Scheduler（毎日 JST 6:00） |
 | `send-billing-reminders` | `{ "action": "send-billing-reminders" }` | EventBridge Scheduler（毎日 **JST 12:00 正午**・GTSS-886） |
+| `send-stripe-onboarding-reminders` | `{ "action": "send-stripe-onboarding-reminders" }` | EventBridge Scheduler（毎日 **JST 10:00**・GTSS-909 / #67） |
 
 ## 運用手順
 
@@ -137,6 +138,59 @@ aws lambda invoke \
 aws lambda invoke \
   --function-name cancel-billing-service-batch-dev \
   --payload '{"action":"send-billing-reminders"}' \
+  --cli-binary-format raw-in-base64-out \
+  --profile cancel-billing-service-dev /dev/stdout
+```
+
+## Stripe オンボーディング自動リマインド送信（`send-stripe-onboarding-reminders`・GTSS-909 / #67）
+
+`src/batch.ts` の `case 'send-stripe-onboarding-reminders'` が `runStripeOnboardingReminders({ now })`
+（`src/services/stripe-onboarding-reminder.service.ts`）を起動する。Stripe 登録が未完了のまま
+「Stripe登録待ち」「オンボーディング待ち」で滞留しているサロンへ、初回案内メールの送信日を起点に
+3 日後・7 日後の各 1 回リマインドを送る。業務仕様（回判定・対象判定・文面）は
+`docs/product/application-flow.md`「Stripe 登録の自動リマインド（3日後・7日後）」を参照。
+
+- **スケジュール**: EventBridge Scheduler `cron(0 10 * * ? *)` + `schedule_expression_timezone="Asia/Tokyo"`
+  （毎日 JST 10:00）。infra は `~/infra/cancel-billing-service-infra`（`batch_execution` に応じ Lambda invoke /
+  ECS RunTask。ECS 経路はタスク定義 family `cancel-billing-batch-{env}-stripe_reminders`）。
+  請求リマインド（正午）とは**独立したスケジュール・独立した停止スイッチ**
+  （`batch_stripe_onboarding_reminders_schedule_state`）。dev / prod とも ENABLED。
+- **夜間ガードは無い**。GTSS-886 の夜間ガードは未払い債権の督促に対する時間帯規制に準じたもので、
+  サロン（取引先）向けのオンボーディング案内には適用されない。
+- **冪等**: `application_notifications` の UNIQUE `(application_id, kind, round)` ＋ 回単位 claim
+  （processing 先行 insert → 配信 → finalize）。タスク丸ごと再実行・多重起動が安全。claim 後に
+  クラッシュして `processing` のまま残った行も**試行済みとして扱い再送しない**（二重送信の絶対回避を優先）。
+  配信は成功したが finalize だけ失敗した場合は `processing` のまま残す（届いたメールを failed にしない）。
+- **一次抽出**: `applicationsRepo.findStripeReminderTargets(todayJst)`。経過日数の窓（3 日以上 14 日未満）を
+  **SQL 側に落とす**。窓が無いと打ち止め済みの滞留申込が毎日フル件数で抽出され、summary の抽出件数が
+  意味を失う。部分インデックス `applications_stripe_reminder_target_idx` の述語と WHERE 句を一致させること。
+  `status` の `IN` 句には**旧日本語値**（`'Stripe登録待ち'` / `'オンボーディング待ち'`）も併記している
+  （生 SQL では `normalizeApplicationStatus` を通せず、取りこぼすと最も長く滞留している申込にだけ
+  1 通も届かないという静かな失敗になる）。
+- **依存**: Stripe（`accounts.retrieve`）と SES を使うため分岐内で `initClients()` を呼ぶ。
+  `accounts.retrieve` には **per-request 予算 `{ timeout: 5000, maxNetworkRetries: 0 }`** を必ず渡す
+  （SDK 既定は 80,000ms / retry 2 で Lambda の実行時間上限を超える）。
+  - `STRIPE_SECRET_KEY` の注入経路は経路ごとに異なる:
+    **Lambda = environment**（`deploy-batch.sh`。`update-function-configuration --environment` は全置換の
+    ため、スクリプトの env JSON に含めないとデプロイのたびに消える）/
+    **ECS = secrets（`valueFrom` = SSM Parameter Store）**（`deploy-batch-ecs.sh` は register 前に
+    environment への平文混入を弾く。実値は Terraform の `container_secrets` が全 family へ配線する）。
+  - メール本文の LP ドメインは `lpBaseUrl()` が **`NODE_ENV` から導出**する
+    （prod=`https://cancel.co.jp` / それ以外=`https://dev.cancel.co.jp`）。`LP_BASE_URL` はローカル上書き専用。
+    `NODE_ENV` が欠けると dev から prod ドメインのリンクを送る事故になる（静的テストで固定済み）。
+  - ECS 経路では `deploy-batch-ecs.sh` の `FAMILIES` 配列にも `${PREFIX}-stripe_reminders` が必要。
+    ここに無い family は register ループの対象外になり、**イメージが永久に bootstrap のまま**になる。
+- **ログ**: 実行ごとに `[stripe-onboarding-reminders] summary:`（抽出件数・Stripe 問い合わせ件数・
+  回別成否・判定値別件数・確定失敗数）を構造化出力。判定値は `completed` / `blocked` / `not_started` /
+  `action_required` / `waiting_stripe` / `stripe_error` の 6 種で、`not_started` と `action_required` を
+  分けて数えることで滞留の主因が「未着手」か「追加要求で詰まった」かを事後に判別できる。
+  送信失敗のアラート・失敗一覧・管理画面表示は設けない（再送手段を持たないため。GTSS-886 と同方針）。
+
+```bash
+# 手動起動（dev）
+aws lambda invoke \
+  --function-name cancel-billing-service-batch-dev \
+  --payload '{"action":"send-stripe-onboarding-reminders"}' \
   --cli-binary-format raw-in-base64-out \
   --profile cancel-billing-service-dev /dev/stdout
 ```

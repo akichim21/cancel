@@ -90,9 +90,12 @@ Stripe/Twilio クライアントはキー未設定だとロード時に例外を
   - Lambda handler（`hono/aws-lambda` の `handle(app)`）が API Gateway プロキシ event を処理し
     `{ statusCode, headers/multiValueHeaders, body }` を返すこと。
 
-## バッチ（restore / purge）のテスト方針（GTSS-20）
+## バッチのテスト方針
 
-申請削除バックアップのバッチ処理は **純粋関数 unit + 実 Postgres 統合の二層**で担保する。
+バッチ処理は **純粋関数 unit + 実 Postgres 統合の二層**で担保するのが基本形。実行時刻は必ず
+`run*({ now })` で注入し、実時間に依存させない。
+
+### 申請削除バックアップ（restore / purge・GTSS-20）
 
 - **純粋関数 unit**（`src/__tests__/unit/application-backup.test.js`）: `buildBackupPayload`
   （`application + cancellations[]` → JSON ペイロード）、`computeExpiresAt`（+90日）、
@@ -107,6 +110,43 @@ Stripe/Twilio クライアントはキー未設定だとロード時に例外を
 - **テスト隔離**: `helpers/db.js` の `truncateAll` に `application_deletion_backups` を含める。
 - **自動化困難（人力）**: EventBridge スケジュールの実発火・`aws lambda invoke` での restore 運用・
   `terraform plan`（AWS 認証前提）は人力スモーク（下記）/ インフラ側で確認する。
+
+### 外部 API を伴うバッチ（Stripe オンボーディング自動リマインド・GTSS-909 / #67）
+
+外部 API（Stripe）への問い合わせが対象判定に入るバッチは、**三分割**で担保する。判定ロジックを
+service 内の純粋関数として切り出しておくことが前提（そうしないと分岐網羅が実 DB テストに寄って重くなる）。
+
+1. **回判定 unit**（`unit/stripe-onboarding-reminder-decision.test.ts`）: `decideOnboardingReminderRound`。
+   JST 暦日の経過日数の**境界値**（2/3/6/7/13/14/15 日）、試行済み回の除外、最小間隔（中 3 日）、
+   対象外ステータスを DB 非依存で網羅する。
+2. **状態判定 unit**（同ファイル）: `evaluateStripeRequirements`。Stripe account オブジェクトを直接渡し、
+   判定表の全分岐（`completed` / `blocked` / `not_started` / `action_required` / `waiting_stripe`）と、
+   `requirements` が `undefined` / `null` / 非配列でも例外にならないことを固定する。
+   文面は別ファイル（`unit/stripe-onboarding-reminder-content.test.ts`）で**完全一致（スナップショット）**
+   と禁止文言リストを固定する（必須フレーズの部分一致だけでは段落削除・署名変更を検出できない）。
+3. **実 Postgres + モック E2E**（`e2e/stripe-onboarding-reminders.test.js`）: バッチ service を直呼びし、
+   UNIQUE 制約 + claim の実挙動（冪等・多重起動）、失敗分離、履歴確定失敗、一次抽出の SQL 側除外条件、
+   直列ループ中の状態変化（退会競合）を検証する。`aws-sdk-client-mock` で SES、
+   `installExternalMocks()` で Stripe を隔離する。
+
+**外部 API モックの落とし穴**:
+
+- `installExternalMocks()` は Stripe モックの全メソッドを `mockReset()` してから注入する。`beforeEach` では
+  **必ず `installExternalMocks()` を呼んだ後に** `mockResolvedValue` / `mockImplementation` を設定する
+  （順序を逆にすると設定が消える）。
+- `stripe.accounts.retrieve` には**既定実装が無い**。未スタブだと `undefined` が返り、
+  `account.requirements` の参照で TypeError になる。
+- 複数申込を 1 実行で処理するバッチでは、連結アカウント ID ごとに戻り値を出し分ける
+  （`mockImplementation(async (id) => ACCOUNTS[id])`）。
+- **実マイグレーション SQL をテストから実行する**: バックフィルのように書式が挙動を左右する SQL は、
+  テストへ書き写すのではなく `readFileSync` でマイグレーションファイルを読んで `sql.raw()` で流す。
+  書き写すと本番へ流れる SQL の書式ミスを検出できない。
+- **新テーブルは `helpers/db.js` の `truncateAll()` へ必ず追加する**（対象を明示列挙しているため、
+  列挙漏れはテスト間でデータが残り冪等テストが偽陽性・偽陰性を起こす）。
+
+**静的検査**（`unit/stripe-onboarding-reminder-contract.test.ts`）: 実行時テストでは検出できない配線漏れを
+固定する。デプロイスクリプトの env / タスク定義 family 契約、送信履歴テーブルの列（PII 非保存）、
+承認経路の本数（経路が増減したら落ちる検知ガード）。
 
 ## 画面 E2E（Playwright）非対象の理由
 
