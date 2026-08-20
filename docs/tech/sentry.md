@@ -53,6 +53,22 @@ API は `src/observability/sentry.ts` の純関数で二重に防御する（`be
 
 フロント3つは **Replay を `maskAllText: true` / `blockAllMedia: true`** でマスクする（admin は顧客 PII 表示が多いため特に重要）。
 
+> **重要: Replay の録画データは `beforeSend` / `beforeSendTransaction` / `beforeBreadcrumb` を通らない**
+> （#72 レビュー指摘 3）。Replay は `createReplayEnvelope` で独自エンベロープを組んで送信しており、
+> 録画イベント用には `beforeAddRecordingEvent` という**別のフック**が用意されている。
+> したがって上のスクラブは**録画には効かない**。さらに `maskAllText` はテキストノードのマスクなので
+> **URL には効かない**。
+> **URL のクエリに機微な値を載せる画面では、値そのものを URL から消すこと**が一次防御になる。
+> **除去は `Sentry.init()` より前に行う。** Replay は init 時の start で `setInitialState()` が
+> `origin + pathname + hash + search` を `initialUrl` / `urls[]` へ記録し、rrweb の最初の Meta
+> イベントも `window.location.href` を保持するため、React のマウント後（コンポーネントの
+> `useEffect`）では手遅れになる。`replaysOnErrorSampleRate: 1.0` なので、その画面で 1 度でも
+> エラーが起きればセッションサンプリングとは無関係にフラッシュされる。
+> 実装例: 管理画面の `/set-password?token=...` は `instrument.ts` が `Sentry.init()` の直前に
+> `captureAndStripSetupToken()`（`src/utils/passwordSetupToken.ts`）を呼び、トークンをモジュール
+> 変数へ退避して URL から取り除く。`SetPasswordPage` はその値を読む。
+> スクラブは多層防御として併用する。
+
 ## 3.5 取り込み失敗の `captureMessage`（GTSS-817-qa / サロンボード取り込み）
 
 サロンボード取り込みのログイン失敗は**例外を投げない**（`login()` が `ok:false` を返すだけ）ため、

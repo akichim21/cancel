@@ -202,6 +202,19 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
 | リンクからの設定・再設定 | `POST /auth/admin-reset-password` | 無認可 | `/set-password` / `/reset-password` |
 | ログイン中の本人による変更 | `POST /auth/admin-change-password` | requireAdmin | `/change-password` |
 
+**`POST /auth/admin-change-password` の 401 は 2 種類ある。** この API は `requireAdmin` を先に通るため、
+「現在のパスワードの打ち間違い」だけでなくトークン期限切れ / 不正 JWT / 無効化済み /
+`last_password_change` による失効も 401 で返る。前者だけ本文に
+`code: 'WRONG_CURRENT_PASSWORD'` を付けて識別できるようにしてある（#72 レビュー指摘 2）。
+**画面側は「401 = 打ち間違い」と決め打ちしてはならない。** 決め打ちすると、`requireAdmin` の 401 本文
+（`{ error: 'Unauthorized', message: '...' }`）から拾った英語の `Unauthorized` が画面に出るうえ、
+セッションが破棄されないまま無効化済みの管理者が画面に留まる。
+`code` を持たない 401 は保持情報を破棄してログイン画面へ遷移させること。
+なお画面側は `code` が無くてもサービス層の本文形（`success: false`）なら打ち間違い扱いにする。
+**API を管理画面より先にロールバックしても**打ち間違いで強制ログアウトさせないための後方互換
+（`requireAdmin` の 401 本文は `success` を持たない）。同じ理由で、画面へ出す文言は
+`success === false` のときの `error` だけを採用する（403 の `Forbidden` も画面へ出さない）。
+
 - トークンは `users.reset_token_hash`（SHA-256 ダイジェスト）+ `users.reset_token_expiry`（発行+24h）。
   **リンクは 1 回きり**で、消費は「ダイジェストが一致する行に対してのみ」という条件付き UPDATE 1 文で
   原子的に行う（read-then-update だと同一リンクの同時オープンで二重消費される）。
@@ -210,6 +223,22 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
 - 未使用トークンは **メールアドレス変更 / 無効化 / 本人のパスワード変更** で同時に失効させる。
 - `POST /auth/admin-forgot-password` は**アカウントの実在有無・メール送信の成否によらず常に 200**
   （列挙対策）。失敗はサーバーログにのみ残す。**画面はレスポンス本文で分岐してはならない。**
+- **メールアドレスによる引き当ては大小文字を無視する**（`admin-account.service.ts` の
+  `findActiveAdminByEmail` / `findUserByEmailInsensitive`。#72 レビュー指摘 5）。
+  書き込み側（作成・更新）は zod が `trim().toLowerCase()` で正規化するが、読み出し側を完全一致に
+  したままだと (a) 保存値に大文字を含む既存行（移行スクリプトが DynamoDB の値を素通しする）へ
+  「パスワードを忘れた」が到達できず**常に 200 なのでサイレントに失敗する**、
+  (b) 入力に大文字や前後空白が混じるとログインが 401 になる、の 2 つが起きる。
+  「入力を小文字化して完全一致」では (a) を直せないので、**照合そのものを大小文字非依存にする**
+  （既存の大文字行の管理者を締め出さず、本番データの事前正規化も要らない）。
+  大小文字違いの重複行がありうる（UNIQUE は生の `email` に対するもの）ため、**完全一致を最優先**し、
+  無ければ有効な管理者を優先して 1 行へ畳む。
+- **DB 例外を `console.error(error)` でそのまま出さない**（`utils/log-error.ts` の `logError` を使う。
+  #72 レビュー指摘 4）。drizzle-orm 0.45 は `DrizzleQueryError` の message に SQL と**バインド値**を
+  連結するため（`pg-core` は node-postgres と aws-data-api の共通層なので本番も同じ）、
+  パスワードハッシュ・トークンダイジェスト・メールアドレスが CloudWatch に平文で残る。
+  ハッシュがソルト無し SHA-256（Issue #41）である以上「ハッシュだから平気」は成り立たず、
+  Aurora のオートポーズ復帰失敗で catch に到達すること自体が現実に起きる。
 
 ### `requireAdmin` の DB 検証（GTSS-72 / #72 / REQ-7）
 
@@ -223,13 +252,23 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
 3. 行なし / DB の `role` が非 admin / `status` が非 active → 401「このアカウントは無効です」
 4. `last_password_change` より前に発行された `iat` → 401「パスワードが変更されています。再度ログインしてください」
    （秒精度・**同一秒は有効**。NULL は失効させない）
+   - `<` にしているのは、パスワード変更と同じ秒に発行する新トークンを自分で失効させないため。
+   - **裏返しの例外**: 無効化と同一秒に発行済みのトークンは失効しない（#72 レビュー指摘 15）。
+     無効化中は `status` チェックで 401 になるが、**再有効化すると `exp` まで復活する**。
+     恒久失効が要件になったら `session_version` 方式へ寄せる（別 Issue）。
+   - `last_password_change` が ISO としてパースできない値の場合は **fail-open**（その管理者だけ
+     失効判定が無効化される）。移行スクリプトは値を無検証でコピーするため、リリース前に
+     実データを確認すること（下記「リリース前に確認する本番データ」）。
 5. DB アクセス失敗 → 500
 
 `requireAdmin` は **async** で、戻り値は判別可能ユニオン `Promise<AuthGuardResult>`。api の
 `tsconfig` は `strict:false` のため、**戻り値型を明示しないと `await` 付け忘れが型検査を素通りし、
-`authCheck.error` が undefined = falsy になって認可が丸ごと無効になる**。呼び出しは 22 箇所
-（`applications.handler.ts` 6 / `cancellation.service.ts` 6 / `salonboard-auth.service.ts` 9 /
-`cancellation-send.service.ts` 1）で、全経路の無認証 401 回帰テストも置いている。
+`authCheck.error` が undefined = falsy になって認可が丸ごと無効になる**。呼び出しは 28 箇所
+（`salonboard-auth.service.ts` 9 / `applications.handler.ts` 6 / `cancellation.service.ts` 6 /
+`admin-users.handler.ts` 4 / `auth.handler.ts` 2 / `cancellation-send.service.ts` 1）で、
+全経路の無認証 401 回帰テストも置いている。
+**この節を根拠に認可監査をするときは内訳を実測し直すこと**（GTSS-72 で新設した
+`admin-users.handler.ts` 4 / `auth.handler.ts` 2 が初版の 22 箇所から漏れていた。#72 レビュー指摘 13）。
 
 ## 残課題
 
@@ -273,4 +312,7 @@ LP 申込時に `applications.verification_token`（hex）＋ `verification_toke
 | `cancel-billing-service-api/src/handlers/applications.handler.ts` | `POST /applications/verify-email`（メール認証。無認可） |
 | `cancel-billing-service/src/contexts/AuthContext.tsx` | サロン側 JWT 管理 |
 | `cancel-billing-service-admin/src/services/ApiService.ts` | 管理画面側 JWT 管理（`clearStoredSession` / `getStoredAdminUser`。公開ルート・パスワード変更は共通 401 リダイレクトを経由しない） |
-| `cancel-billing-service-admin/src/utils/sentryScrub.ts` | Sentry へ送るイベント・breadcrumb から URL のクエリ（`?token=`）を除去する純関数 |
+| `cancel-billing-service-admin/src/utils/sentryScrub.ts` | Sentry へ送るイベント・breadcrumb から URL のクエリ（`?token=`）を除去する純関数（**Replay の録画には効かない**。多層防御用） |
+| `cancel-billing-service-admin/src/utils/passwordSetupToken.ts` | `Sentry.init()` より前にパスワード設定トークンを URL から退避・除去する（Replay の `initialUrl` / rrweb Meta イベント対策） |
+| `cancel-billing-service-api/src/services/admin-account.service.ts` | 「管理者として有効か」の唯一の判定（`isActiveAdmin` / `findActiveAdmin`）とメールの大小文字非依存な引き当て（`findActiveAdminByEmail` / `findUserByEmailInsensitive`） |
+| `cancel-billing-service-api/src/utils/log-error.ts` | Error をそのまま `console.error` しないための `logError` / `isUniqueViolation`（DrizzleQueryError はバインド値を message に含む） |

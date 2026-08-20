@@ -168,6 +168,41 @@ await seedDefaultTestAdmin();                     // 明示的に投入（descri
 `SendEmailCommand` に集約するため、宛先が増えても呼び出し回数は 1 のままで `toHaveLength(1)` 系の
 アサートは落ちない。opt-out を広く撒きすぎないこと。
 
+### DB の競合（write skew 等）を再現するテストの書き方（#72 レビュー指摘 1）
+
+**API 経路（`app.request()`）を 2 本 `Promise.all` しても、この環境では競合が再現しなかった。**
+`requireAdmin` の DB 検証 → 対象行の取得 → 本命のクエリ、と DB 往復が挟まるぶん 2 リクエストの
+到達時刻がずれるためで、実測は 40 回中 0 回。本番では別々の Lambda 実行として Aurora に届くので
+このずれ方は同じにならない。**API 経路のテストは「不変条件が保たれること」の確認に留め、競合
+そのものは repository を直接 2 本同時に呼んで再現させること。**
+
+さらに **`truncateAll()` の直後に競合させても再現しなかった**（旧実装でも 30 回中 0 回）。
+TRUNCATE が relcache を無効化するため、直後に**別接続**でそのテーブルを触ると再構築ぶん遅れて
+2 本がずれる、というのが観測に合う説明。同時 2 本の SELECT で pool の接続を先に温めてから
+競合させると再現率が 30 回中 29 回まで上がった。
+
+いずれも**確率的な再現**であり、決定的な保証ではない（接続の割り当て・マシン負荷に依存する）。
+試行を繰り返すループにして、修正前に実際に落ちることを必ず確認すること。
+
+```js
+await truncateAll({ seedDefaultAdmin: false });
+await seedAdmin({ id: 'admin_a', ... });
+await seedAdmin({ id: 'admin_b', ... });
+
+// ★ これが無いと再現しない（旧実装でも 30 回中 0 回だった）
+await Promise.all([usersRepo.listAdmins(), usersRepo.listAdmins()]);
+
+const [ra, rb] = await Promise.all([
+  usersRepo.deactivateIfOtherActiveAdminExists('admin_a', { updatedAt: now }),
+  usersRepo.deactivateIfOtherActiveAdminExists('admin_b', { updatedAt: now }),
+]);
+expect([ra, rb].filter(Boolean)).toHaveLength(1);
+```
+
+実測（`src/__tests__/e2e/admin-users.test.js` の T-19b / T-19c）: ウォームアップ有りなら旧実装が
+30 回中 29 回で両方成功（＝ 0 人化）、現行実装は管理者 2/3/4 名 × 各 100 回で 0 件。
+**「落ちる書き方になっている」だけでは不十分で、修正前に実際に落ちることを確認すること。**
+
 **静的検査**（`unit/stripe-onboarding-reminder-contract.test.ts`）: 実行時テストでは検出できない配線漏れを
 固定する。デプロイスクリプトの env / タスク定義 family 契約、送信履歴テーブルの列（PII 非保存）、
 承認経路の本数（経路が増減したら落ちる検知ガード）。
