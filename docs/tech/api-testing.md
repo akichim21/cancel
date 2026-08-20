@@ -144,6 +144,71 @@ service 内の純粋関数として切り出しておくことが前提（そう
 - **新テーブルは `helpers/db.js` の `truncateAll()` へ必ず追加する**（対象を明示列挙しているため、
   列挙漏れはテスト間でデータが残り冪等テストが偽陽性・偽陰性を起こす）。
 
+### `truncateAll()` は既定で管理者 1 行を投入する（GTSS-72 / #72）
+
+`requireAdmin` が DB を引くようになったため（`docs/tech/auth.md`）、`adminToken()`（既定
+`sub='admin_uuid_1'`）を使う e2e は `users` に対応する行が無いと 401 になる。`truncateAll()` 自身が
+**既定 admin（`DEFAULT_TEST_ADMIN`。`id='admin_uuid_1'` / `role='admin'` / `status='active'` /
+`email='default-admin@test.invalid'`）を投入する**ことで、呼び出し側 52 箇所を無改修に保っている。
+
+> `beforeEach` に seed 行を足す方式は採れない。`truncateAll()` は `beforeEach` 以外に **`it()` の
+> 本体内でも呼ばれている**（ステータス遷移ループ等）ため、`beforeEach` だけに置くとそれらが壊れる。
+
+```js
+await truncateAll();                              // 既定 admin あり（ほとんどのテストはこれでよい）
+await truncateAll({ seedDefaultAdmin: false });   // 既定 admin なし
+await seedDefaultTestAdmin();                     // 明示的に投入（describe 単位で認証だけ要る場合）
+```
+
+**「有効な管理者の頭数・件数・宛先」を数えるテストでは必ず opt-out すること。** 既定 admin は必ず
+`role='admin'` / `status='active'` になるため 1 行ぶんずれる。とくに「有効な管理者が 0 人になる操作の
+拒否」は条件へ一度も到達せず**ガードが未実装でも緑になる**（＝誤った理由で緑になる）。
+
+判定軸は「SES 呼び出し回数」ではなく **`ToAddresses` の中身**。運営通知は全宛先を 1 通の
+`SendEmailCommand` に集約するため、宛先が増えても呼び出し回数は 1 のままで `toHaveLength(1)` 系の
+アサートは落ちない。opt-out を広く撒きすぎないこと。
+
+### DB の競合（write skew 等）を再現するテストの書き方（#72 レビュー指摘 1）
+
+**API 経路（`app.request()`）を 2 本 `Promise.all` しても、この環境では競合が再現しなかった。**
+`requireAdmin` の DB 検証 → 対象行の取得 → 本命のクエリ、と DB 往復が挟まるぶん 2 リクエストの
+到達時刻がずれるためで、実測は 40 回中 0 回。本番では別々の Lambda 実行として Aurora に届くので
+このずれ方は同じにならない。**API 経路のテストは「不変条件が保たれること」の確認に留め、競合
+そのものは repository を直接 2 本同時に呼んで再現させること。**
+
+さらに **`truncateAll()` の直後に競合させても再現しなかった**（旧実装でも 30 回中 0 回）。
+TRUNCATE が relcache を無効化するため、直後に**別接続**でそのテーブルを触ると再構築ぶん遅れて
+2 本がずれる、というのが観測に合う説明。同時 2 本の SELECT で pool の接続を先に温めてから
+競合させると再現率が 30 回中 29 回まで上がった。
+
+いずれも**確率的な再現**であり、決定的な保証ではない（接続の割り当て・マシン負荷に依存する）。
+試行を繰り返すループにして、修正前に実際に落ちることを必ず確認すること。
+
+```js
+await truncateAll({ seedDefaultAdmin: false });
+await seedAdmin({ id: 'admin_a', ... });
+await seedAdmin({ id: 'admin_b', ... });
+
+// ★ これが無いと再現しない（旧実装でも 30 回中 0 回だった）
+await Promise.all([usersRepo.listAdmins(), usersRepo.listAdmins()]);
+
+const [ra, rb] = await Promise.all([
+  usersRepo.deactivateIfOtherActiveAdminExists('admin_a', { updatedAt: now }),
+  usersRepo.deactivateIfOtherActiveAdminExists('admin_b', { updatedAt: now }),
+]);
+expect([ra, rb].filter(Boolean)).toHaveLength(1);
+```
+
+実測（条件込みで読むこと。再現率は接続の割り当てに依存する）:
+
+| 条件 | 旧実装（EXISTS のみ）の 0 人化 | 現行実装 |
+|---|---|---|
+| pg を直接 2 接続から同時に叩く（スクリプト） | 200 回中 182 回 | 0 回 |
+| vitest 内・`truncateAll()` 直後（ウォームアップ無し） | 30 回中 0 回（**検出できない**） | — |
+| vitest 内・ウォームアップ有り（T-19b / T-19c） | 30 回中 29 回 | 管理者 2/3/4 名 × 各 100 回で 0 件 |
+
+**「落ちる書き方になっている」だけでは不十分で、修正前に実際に落ちることを確認すること。**
+
 **静的検査**（`unit/stripe-onboarding-reminder-contract.test.ts`）: 実行時テストでは検出できない配線漏れを
 固定する。デプロイスクリプトの env / タスク定義 family 契約、送信履歴テーブルの列（PII 非保存）、
 承認経路の本数（経路が増減したら落ちる検知ガード）。
