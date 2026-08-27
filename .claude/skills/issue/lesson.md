@@ -85,3 +85,12 @@
   2. **同一ターン内で同期ブロック**: `run_in_background: true` で起動して task_id を得たら、`TaskOutput({task_id, block: true, timeout: 600000})` を status が completed になるまで繰り返し呼ぶ（codexが20分かかってもループで待てる）。`<task-notification>` の完了通知には頼らない。
   3. **待機中にターンを終了しない**。「監視中」「Monitorで追跡中」「完了したら返します」を最終メッセージにして終わるのは失敗。awk抽出結果を返すまでターンを継続する。
 - **適用範囲**: ask-codex / issue-create / issue-update / issue-manually-update / verify-testcases の各 SKILL を「sonnet ＋ 同期 TaskOutput ブロック ＋ ターン終了禁止」に統一済み（2026-06-02）。
+
+### 名前付きチームメイトの報告は SendMessage を呼ばないと永久に失われる
+- **問題**: `Agent` ツールに `name` を付けて起動したエージェント（`taskKind: in_process_teammate`）は、最終メッセージがリーダーへ自動的に返らない。2026-08-26 の Issue 作成（tabi #4019 / hotel-infra #170）で、`docs-reviewer` と `req-completeness-checker` の2体がそれぞれ5,000字超の完全なレビューを書き上げながら `SendMessage` を**0回**しか呼ばず、リーダーには idle 通知しか届かなかった。**催促しても直らない**（2体とも催促後に再び無言で idle）。同時起動した `codebase-explorer` は `SendMessage` を1回呼んで届いており、本人も「本文にしか書いておらず届いていませんでした」と認めた
+- **正しい対応**:
+  1. 起動プロンプトの末尾に「結果は必ず `SendMessage({to: "team-lead", ...})` で送ること。最終メッセージに書くだけでは届かない」を必ず入れる
+  2. idle 通知を完了とみなさない。**レポート本文を受け取ったか**で判定する
+  3. 催促は1回まで。届かなければ `~/.claude/projects/<project>/<session-id>/subagents/agent-a<name>-*.jsonl` の最後の assistant テキストブロックから直接回収する（`SendMessage` が0回なら本文は確実に残っている）
+  4. 回収もできなければリーダー自身が代替実施する。レビュー未実施のまま Issue を作成しない
+- **失われかけた内容の重大度**: この2体のレポートには、作成済み Issue を壊す High 指摘が含まれていた。(1) `.circleci/config.yml` の削除行範囲が誤りで、指定どおり消すと孤立した `- run:` が残り YAML が壊れる (2) 本番/staging の PDF 画像化は Lambda 側で完結するため、「staging で PDF をアップロードして確認」は policy 変更の担保にならない。**回収しなければ両方とも Issue に残ったままだった**
