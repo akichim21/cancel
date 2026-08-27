@@ -1,0 +1,33 @@
+{
+  "issueNumber": 64,
+  "branchName": "GTSS-817-slack",
+  "baseBranchOverride": "GTSS-817-qa",
+  "worktreeDir": "GTSS-817-slack",
+  "slot": 1,
+  "ports": {
+    "api": 1339,
+    "admin": 3001,
+    "userPortal": 5174,
+    "lp": 5274
+  },
+  "repos": {
+    "cancel-billing-service-api": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-api/.worktrees/GTSS-817-slack",
+      "branch": "GTSS-817-slack",
+      "baseBranch": "GTSS-817-qa"
+    },
+    "cancel-billing-service": {
+      "hasWorktree": false
+    },
+    "cancel-billing-service-admin": {
+      "hasWorktree": true,
+      "worktreePath": "/Users/aki/cancel/cancel-billing-service-admin/.worktrees/GTSS-817-slack",
+      "branch": "GTSS-817-slack",
+      "baseBranch": "GTSS-817-qa"
+    },
+    "cancel-billing-service-lp": {
+      "hasWorktree": false
+    }
+  }
+}

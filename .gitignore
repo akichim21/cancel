@@ -18,3 +18,5 @@ __pycache__
 .login.json
 .login-store.json
 .login-kirei.json
+node_modules
+.worktrees
