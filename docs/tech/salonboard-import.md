@@ -252,6 +252,13 @@ dev 実測（2026-08-01・Lambda ログ）ではログイン 1 回に **7〜8s**
   **`*.salonboard.com` 以外のホスト（GTM/karte/GA/広告/Sentry 等）も `route.abort()`**。Akamai の JS と `_next`
   バンドルはファーストパーティ（`*.salonboard.com`。バンドルは `imgbp.salonboard.com`）なので残す。これで Decodo の
   実測転送量の**約 7 割（GTM 単体 10.8MB 等）を削減**。JS/CSS のファーストパーティは Akamai の JS 実行に必要なので通す。
+- **セッション内アセットキャッシュ**（`SessionAssetCache`）: 後述「Decodo 転送量の内訳と削減」。route 傍受で
+  効かなくなる HTTP キャッシュの代替を自前で持ち、同一 URL の再取得をなくす。
+- **service worker を止める**（`serviceWorkers: 'block'`）: SW 発の通信は route 傍受の対象外で、登録されると
+  遮断が素通しになる。取り込みに SW は不要。
+- **ブラウザ自身のバックグラウンド通信を止める**（`NO_BACKGROUND_NETWORK_ARGS`）: component update /
+  safebrowsing / autofill / 接続確認は**ページ発ではないため route では止められず**、proxy を流れていた
+  （実測 google.com 3.9MB・content-autofill.googleapis.com 1.3MB・connectivitycheck.gstatic.com）。
 - **人間的ペーシング**: 直列 + リクエスト間ジッタ。
 - **CAPTCHA 検知**: login / 各ページ応答から検知したら `SalonboardCaptchaError` を投げ、当該ランを失敗として
   理由記録し中断（無限ループ・無駄な velocity を回避）。将来の自動解決はフック差し替えで対応。
@@ -372,6 +379,38 @@ dev/prod は `.env.development`/`.env.production` に `DECODO_PROXY_HOST`/`DECOD
   「店舗取得失敗（2回試行）: …」になる。
 - 予約詳細取得の一過性失敗も**同じ引き直しで 1 回だけ再試行**する（後述「予約詳細取得の失敗リトライ」）。
   引き直し上限（`MAX_SESSION_RENEWALS_PER_RUN`）は店舗レベルと**共有**する。
+
+### Decodo 転送量の内訳と削減（2026-09-03 実測）
+
+Decodo は転送量課金で、ダッシュボードはホスト別合計しか出さない（実績: imgbp.salonboard.com 469MB /
+salonboard.com 415MB / google.com 3.9MB / content-autofill.googleapis.com 1.3MB / sentry 104KB /
+connectivitycheck.gstatic.com 1.8KB）。内訳を割るために `scripts/salonboard-traffic-probe.ts` を用意した
+（CDP の `Network.loadingFinished.encodedDataLength` を URL / ホスト / 種別で集計する。実アカウントで
+実サイトへ出るため、取り込み本体と同時に走らせないこと）。
+
+**判明したこと**: 画像・フォント・メディア・サードパーティは既に遮断できていた。残っていた大半は
+**同一 URL の再取得**で、ログイン + 1 店舗 + 詳細 3 件の最小フローで 2.38MB のうち **1.38MB（58%）**が
+重複だった（`CLP/js/bt/common.js`・`jquery`・`CLP/css/bt/common.css` を毎ナビゲーション、Akamai のセンサ JS
+`salonboard.com/<ランダム>/…`（`max-age=21600`・約 80KB）を 12〜14 回）。
+
+原因は **Playwright の `route()` を有効にすると Chromium の HTTP キャッシュが無効化される**こと
+（ローカル検証: 同一の `max-age` 付き JS を 4 ナビゲーションで、傍受ありは 4 回 782KB / 傍受なしは
+1 回 196KB + キャッシュヒット 3。`launchPersistentContext` にしても傍受が有効なら効かない。CDP の
+`Network.setBlockedURLs` はキャッシュを無効化しない）。
+
+対策は**傍受を残したままキャッシュを自前で持つ**こと（`SessionAssetCache`）。傍受をやめると
+サードパーティ遮断（GTM 等）が失われ、そちらの方が高くつく。
+
+| 項目 | 方針 |
+|---|---|
+| キャッシュ対象 | `GET` / `200` / resourceType が `script` `stylesheet` / `Cache-Control` に `max-age>0`（`no-store`・`no-cache` は対象外） |
+| 対象外 | HTML（予約詳細は `no-store`）・GraphQL 等のデータ取得・遮断済みの画像/フォント/メディア |
+| キー | クエリ込みの URL。2 回目以降は `route.fulfill` で返す（`x-sb-asset-cache: hit` を付与＝実転送でない印） |
+| 上限 | 1 エントリ 4MB / セッション合計 48MB（超過は挿入順に破棄）。`close()` で解放 |
+| 期限 | サーバの `max-age` を尊重（期限切れは再取得） |
+
+実ブラウザは `max-age` を尊重して再取得しないため、キャッシュする方が挙動としても自然（毎回引き直す方が
+むしろ不自然）。**実測: 同一フローで 2.38MB → 0.68MB（-71%）**、所要時間も 30s → 18s に短縮した。
 
 ### 予約詳細取得の失敗リトライ
 
