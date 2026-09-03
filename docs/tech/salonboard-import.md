@@ -370,8 +370,34 @@ dev/prod は `.env.development`/`.env.production` に `DECODO_PROXY_HOST`/`DECOD
 - **店舗単位**は当該店舗の認証情報で張り直す（他店舗には影響しない）。
 - 試行回数は `shops[].attempts` に残る（1 回で済んだ店舗には付かない）。`shops[].error` は再試行した場合
   「店舗取得失敗（2回試行）: …」になる。
-- 予約詳細取得の失敗（`detail_fetch_failed` 等）はここではリトライしない。予約単位で取り込みログに残り、
-  **翌日の日次実行で再評価される**（非 terminal reason）ため、一覧が取れていれば取りこぼしは起きない。
+- 予約詳細取得の一過性失敗も**同じ引き直しで 1 回だけ再試行**する（後述「予約詳細取得の失敗リトライ」）。
+  引き直し上限（`MAX_SESSION_RENEWALS_PER_RUN`）は店舗レベルと**共有**する。
+
+### 予約詳細取得の失敗リトライ
+
+予約詳細（`page.goto(/CLP/bt/reserve/net/reserveDetail/?reserveId=…)`）も同じ理由で `NAV_TIMEOUT`(60s) を
+超えて落ちる。2026-09-03 dev の実測では、**同一ランで 21 予約を処理できている店舗**の中で 1 予約だけ詳細
+取得が timeout し、その予約は取り込みログに `timeout` で残ったうえ、**店舗サマリが failed=1 になって運営へ
+「一部失敗」通知**が飛んだ。同じ予約はその 5 分後、同じランの別セッション（別出口 IP）では取得できており、
+恒久障害ではなく**出口 IP 起因の一過性失敗**だった（直近 14 日で 11 件・うち 7 件が同一店舗）。
+
+そこで店舗レベルと同じく、**新しいスティッキーセッション（=新 IP）へ引き直して 1 回だけ再試行**する
+（`MAX_DETAIL_FETCH_ATTEMPTS = 2`）。引き直しの前にはジッタを挟む。
+
+| 観測（`classifyFailure` の分類） | 挙動 | 記録される理由 |
+|---|---|---|
+| `timeout` / `proxy_error` | 新セッション（=新 IP）で**1 回だけ**再試行 | 復旧すれば失敗計上なし。再失敗で `timeout` / `proxy_error` |
+| `captcha_detected` | 引き直さない（velocity を上げないため。ログイン・店舗遷移と同じ） | `captcha_detected` |
+| 理由分類できない失敗（パース失敗・HTML 構造変化・誤店舗 4xx） | 引き直さない | `detail_fetch_failed` |
+
+- **引き直したセッションは店舗コンテキストに入っていない**（ログイン直後の状態）。詳細ページは店舗
+  コンテキスト前提なので、再試行の前に `enter` からやり直す。入り直しに失敗した場合はその状態を持ち越し、
+  **次の予約の詳細取得前に入り直す**（コンテキストが外れたまま別店舗のデータ・4xx を掴まないための不変条件）。
+- 引き直し上限（`MAX_SESSION_RENEWALS_PER_RUN` = 2 回/実行）は**店舗レベルと共有**する。上限到達後は
+  再試行せず、従来どおりその予約を失敗として確定する（`session_renew_skipped`）。1 実行で増える追加
+  ナビゲーションは最大 2 回分に収まり、手動取り込みが動く batch Lambda の 600s も食い潰さない。
+- 失敗が確定した予約は従来どおり `external_import_logs` に理由付きで残り、**翌日の日次実行で再評価される**
+  （非 terminal reason）。取り込み済みになった時点で当該ログ行は削除される。
 
 **ログイン成功判定（単一店舗アカウント対応）**: `userid` は doLogin 応答に載る。会社単位は遷移先 groupTop にも
 残るが、**単一店舗アカウントは login 後 `/CLP/bt/top/`（店舗トップ）へ遷移し最終 HTML に userid を持たない**。
@@ -431,7 +457,10 @@ enterSingleStore → 一覧（本番窓で実キャンセル取得）→ 予約�
   `shop_fetch_retry`（一過性失敗を検知し引き直す）/ `shop_fetch_recovered`（再試行で成功。`console.log` 側）/
   `shop_fetch_failed`（失敗確定）で、`attempt` / `maxAttempts` と店舗 ID を含む。引き直しの可否は
   `session_renew_skipped`（1 実行あたりの上限に到達）/ `session_renew_failed`（再ログイン失敗）で追える。
-- 予約詳細取得の失敗は**既存のログ形式のまま**変えない（予約単位で取り込みログに残るため）。
+- **予約詳細取得**の引き直しも同じ形式で出す。`event` は `detail_fetch_retry` / `detail_fetch_recovered`
+  （`console.log` 側）で、店舗 ID に加えて `externalReservationId` と `maxAttempts`（=2）を含む。
+  失敗確定時の行（`[salonboard-import] detail fetch failed store=… reservation=… reason=…`）は
+  **既存のログ形式のまま**変えない（予約単位で取り込みログにも残るため）。
 - 連携設定未完了（`reasonCode` なし）は既知状態なので出力しない（admin の `shops[].error` には出る）。
 
 ```json
